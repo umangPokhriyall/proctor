@@ -13,8 +13,9 @@
 //! single [`sys`] module carries `#![allow(unsafe_code)]` with a `// SAFETY:`
 //! comment on every block. Every other crate keeps `#![forbid(unsafe_code)]`.
 //!
-//! Session 1 lands [`key`] and [`aead`]; the `memfd`/`transcode` no-disk path
-//! lands in Session 2.
+//! Session 1 landed [`key`] and [`aead`]; Session 2 adds the no-disk path —
+//! [`memfd`] (anonymous RAM, decrypt-into-memfd, child fd hand-off) and
+//! [`transcode`] (ffmpeg over `/proc/self/fd/N`, never a disk path).
 
 #![deny(unsafe_code)]
 
@@ -22,10 +23,14 @@ use thiserror::Error;
 
 pub mod aead;
 pub mod key;
+pub mod memfd;
 mod sys;
+pub mod transcode;
 
 pub use aead::{decrypt, encrypt, EncryptedSegment, Role, SecretBuf, SegmentAad};
 pub use key::SecretKey;
+pub use memfd::{decrypt_into_memfd, MemFd};
+pub use transcode::transcode_no_disk;
 
 /// Errors surfaced by the in-memory crypto path. Authentication failure is the
 /// security-critical one: it returns `Err` and never yields plaintext.
@@ -48,4 +53,19 @@ pub enum CryptoError {
     /// AES-GCM encryption failed (e.g. plaintext exceeds the GCM length bound).
     #[error("AES-GCM encryption failed")]
     Encrypt,
+    /// `memfd_create` (or its labelling) failed — no anonymous RAM file available.
+    #[error("memfd_create failed")]
+    Memfd,
+    /// An I/O error on a memfd or the ffmpeg child (read/write/seek/spawn).
+    #[error("crypto I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    /// ffmpeg exited non-zero. Carries a bounded tail of stderr (never media).
+    #[error("ffmpeg transcode failed: {stderr_tail}")]
+    TranscodeFailed {
+        /// The last few KiB of ffmpeg stderr, where the cause is.
+        stderr_tail: String,
+    },
+    /// ffmpeg exceeded the wall-clock budget and was killed.
+    #[error("ffmpeg transcode timed out")]
+    Timeout,
 }

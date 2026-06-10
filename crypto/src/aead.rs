@@ -103,8 +103,10 @@ pub struct SecretBuf {
 
 impl SecretBuf {
     /// Take ownership of `buf`, pinning its pages with `mlock`. The caller must
-    /// not have aliased the bytes elsewhere.
-    fn from_vec(buf: Vec<u8>) -> Result<Self, CryptoError> {
+    /// not have aliased the bytes elsewhere. `pub(crate)` so [`crate::memfd`] can
+    /// read plaintext out of an anonymous RAM file into the same pinned, zeroizing
+    /// buffer type.
+    pub(crate) fn from_vec(buf: Vec<u8>) -> Result<Self, CryptoError> {
         if !buf.is_empty() {
             sys::mlock(buf.as_ptr(), buf.len())?;
         }

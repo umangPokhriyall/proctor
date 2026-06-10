@@ -1,60 +1,51 @@
 //! proctor `core` — sans-IO protocol, task/lease/segment state machine, commit-reveal types.
 //!
 //! This crate is **sans-IO**: it never touches a socket, Redis, ffmpeg, or the
-//! filesystem. It is the single abstraction that drives `crypto`, `verify`,
-//! `sched`, `verifier`, and `worker` unmodified.
+//! filesystem, and it reads no clock and samples no randomness. Time and
+//! randomness are *inputs*. It is the single abstraction that drives `crypto`,
+//! `verify`, `sched`, `verifier`, and `worker` unmodified.
 //!
-//! Phase 0 declares **shape only** — every body is `todo!()`. The types below are
-//! the intended public surface for the Phase 1 freeze.
+//! Phase 1 fills this crate module by module (`docs/specs/phase1-spec.md` §2) and
+//! then **freezes** it. The module layout being assembled:
+//!
+//! - [`id`]    — newtype identifiers, the monotonic [`id::Epoch`], injected [`id::LogicalTime`].
+//! - [`lease`] — the [`lease::Lease`] with its fencing epoch and the pure expiry predicate.
+//! - `task`    — `TaskKind { Transcode, Stitch }` (Session 2).
+//! - `commit`  — Merkle commit-reveal over opaque leaves (Session 2).
+//! - `state`   — the `Task` state machine and `apply` (Session 3).
+//! - `proto`   — the frozen wire messages and canonical encode/decode (Session 4).
 //!
 //! ============================================================================
-//! FROZEN in Phase 1.  Do not add or change public items after the Phase 1
-//! freeze ceremony; every later phase consumes this surface unmodified.
+//! Becomes FROZEN at the end of Phase 1 (tag `v0.1.0-core-frozen`). Do not add or
+//! change public items after the freeze ceremony; every later phase consumes this
+//! surface unmodified. If a later phase seems to need a change here, it is wrong.
 //! ============================================================================
 
-use thiserror::Error;
+pub mod id;
+pub mod lease;
 
-/// Identifies a single GOP-aligned segment within a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SegmentId(pub u64);
+pub use id::{Epoch, JobId, LogicalTime, OutputRef, SegmentId, TaskId, WorkerId};
+pub use lease::Lease;
 
-/// Identifies a transcoding task (a whole asset, split into segments).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TaskId(pub u64);
+// ---------------------------------------------------------------------------
+// Phase 0 residue — shape-only stubs not yet modularized. These are replaced by
+// the `commit` module (Session 2) and resolved when the manifest's home is
+// settled. They are retained here only so the Phase 0 dependent stubs (`worker`,
+// `bench`, `verify`) keep compiling on a green tree between Phase 1 sessions; no
+// Session-1 logic touches them.
+// ---------------------------------------------------------------------------
 
-/// Identifies a worker in the registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WorkerId(pub u64);
-
-/// Monotonic lease epoch; bumped on every (re)assignment so a stale holder is detectable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Epoch(pub u64);
-
-/// A monotonic deadline in milliseconds. Sans-IO: no wall clock is read in `core`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Deadline(pub u64);
-
-/// A lease: the single authority for "who holds this segment, until when, in which epoch".
-#[derive(Debug, Clone, Copy)]
-pub struct Lease {
-    pub holder: WorkerId,
-    pub segment: SegmentId,
-    pub deadline: Deadline,
-    pub epoch: Epoch,
-}
-
-/// The task/segment lifecycle. The single reclaim authority drives every transition.
+/// `SHA-256` over a worker's encoded output, committed **before** the worker learns the
+/// challenged timestamps (commit-reveal). Reworked into a Merkle commitment in Session 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskState {
-    Pending,
-    Leased,
-    Transcoded,
-    Verifying,
-    Verified,
-    Released,
-    Stitched,
-    Reclaimed,
-    Failed,
+pub struct Commitment(pub [u8; 32]);
+
+/// The post-challenge reveal a worker returns so the verifier can check the commitment.
+/// Reworked into the Merkle `Reveal` (`leaves` + `proofs`) in Session 2.
+#[derive(Debug, Clone)]
+pub struct Reveal {
+    pub segment: SegmentId,
+    pub commitment: Commitment,
 }
 
 /// A GOP-aligned segment description within a manifest. Sans-IO: timing, not bytes.
@@ -70,67 +61,4 @@ pub struct Segment {
 pub struct SegmentManifest {
     pub task: TaskId,
     pub segments: Vec<Segment>,
-}
-
-/// `SHA-256` over a worker's encoded output, committed **before** the worker learns the
-/// challenged timestamps (commit-reveal — so it cannot retrofit a tampered result).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Commitment(pub [u8; 32]);
-
-/// The post-challenge reveal a worker returns so the verifier can check the commitment.
-#[derive(Debug, Clone)]
-pub struct Reveal {
-    pub segment: SegmentId,
-    pub commitment: Commitment,
-}
-
-/// The sans-IO protocol envelope exchanged across the control plane. Transport is elsewhere.
-#[derive(Debug, Clone)]
-pub enum Message {
-    /// Scheduler -> worker: a pushed lease assignment (the worker never self-selects).
-    Assign(Lease),
-    /// Worker -> scheduler: heartbeat extending its lease.
-    Heartbeat {
-        worker: WorkerId,
-        segment: SegmentId,
-        epoch: Epoch,
-    },
-    /// Worker -> scheduler: output commitment for a finished segment.
-    Commit(Reveal),
-    /// Verifier -> worker: a challenge carrying **only** timestamps; the expected hash never leaves the verifier.
-    Challenge {
-        segment: SegmentId,
-        timestamps_ms: Vec<u64>,
-    },
-}
-
-/// Errors surfaced by the `core` state machine.
-#[derive(Debug, Error)]
-pub enum CoreError {
-    /// An attempted state transition is not permitted by the lifecycle.
-    #[error("illegal transition from {from:?} to {to:?}")]
-    IllegalTransition { from: TaskState, to: TaskState },
-    /// A lease operation referenced a stale epoch.
-    #[error("stale epoch: holder presented {held:?}, current is {current:?}")]
-    StaleEpoch { held: Epoch, current: Epoch },
-}
-
-impl TaskState {
-    /// Whether `self` may legally transition to `next`. Phase 1 defines the table.
-    pub fn can_transition_to(self, next: TaskState) -> bool {
-        todo!("Phase 1: task lifecycle transition table (next = {next:?})")
-    }
-}
-
-impl Lease {
-    /// Whether this lease has expired relative to `now`. Phase 1 defines expiry semantics.
-    pub fn is_expired(&self, now: Deadline) -> bool {
-        todo!("Phase 1: lease expiry (now = {now:?})")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn builds() {}
 }

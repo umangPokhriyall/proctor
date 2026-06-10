@@ -8,7 +8,10 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Phase-0 dependency allowlist (see CLAUDE.md): thiserror only.
-# Heavy deps (aes-gcm, redis, an SSIM crate, ...) arrive with their phases.
+# Dependency allowlist (see CLAUDE.md). Phase 1 adds the `core` wire/commit deps;
+# heavier deps (aes-gcm, redis, an SSIM crate, ...) still arrive with their phases.
 [workspace.dependencies]
 thiserror = "2"
+# Phase 1 (core): the protocol types are the wire contract, so their serialized
+# shape is frozen. Added per-session as the modules that use them land.
+serde = { version = "1", features = ["derive"] }

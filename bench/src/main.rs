@@ -11,19 +11,20 @@
 // Phase 0 scaffold: the entry point below is a stub wired up in Phase 6.
 #![allow(dead_code)]
 
-use proctor_core::SegmentManifest;
+use proctor_core::Task;
 
 fn main() {
     eprintln!("proctor bench — Phase 0 stub; harness lands in Phase 6");
 }
 
 /// Inject a workload **directly** into the scheduler queue — no HTTP, no network ingest.
-/// This makes the locked no-API decision visible in code from day one.
-pub fn inject_workload(manifest: SegmentManifest) {
+/// This makes the locked no-API decision visible in code from day one. The unit of
+/// work is a frozen `proctor_core::Task` (Phase 6 wires the real queue path).
+pub fn inject_workload(task: Task) {
     todo!(
-        "Phase 6: direct queue injection of task {:?} ({} segments)",
-        manifest.task,
-        manifest.segments.len()
+        "Phase 6: direct queue injection of task {:?} (kind {:?})",
+        task.id,
+        task.kind
     )
 }
 

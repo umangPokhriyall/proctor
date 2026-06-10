@@ -13,7 +13,7 @@
 //! - [`task`]   — `TaskKind { Transcode, Stitch }`, strictly distinct.
 //! - [`commit`] — Merkle commit-reveal over opaque leaves.
 //! - [`state`]  — the `Task` state machine and the pure `apply` transition.
-//! - `proto`    — the frozen wire messages and canonical encode/decode (Session 4).
+//! - [`proto`]  — the frozen wire messages and canonical postcard encode/decode.
 //!
 //! ============================================================================
 //! Becomes FROZEN at the end of Phase 1 (tag `v0.1.0-core-frozen`). Do not add or
@@ -24,12 +24,17 @@
 pub mod commit;
 pub mod id;
 pub mod lease;
+pub mod proto;
 pub mod state;
 pub mod task;
 
 pub use commit::{Challenge, Commitment, LeafIndex, MerkleProof, Reveal};
 pub use id::{Epoch, JobId, LogicalTime, OutputRef, SegmentId, TaskId, WorkerId};
 pub use lease::Lease;
+pub use proto::{
+    decode, encode, Assignment, ChallengeMsg, HeartbeatMsg, Message, ProtoError, RevealMsg,
+    SubmissionMsg, VerifyDetail, VerifyRequest, VerifyResult,
+};
 pub use state::{
     FailureReason, ReputationDelta, Task, TaskAction, TaskEvent, TaskState, TransitionError,
     MAX_RETRIES,

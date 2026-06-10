@@ -16,4 +16,6 @@ thiserror = "2"
 # shape is frozen. Added per-session as the modules that use them land.
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10" # SHA-256 for the Merkle commit-reveal (core/commit.rs).
+# Canonical, deterministic codec for the frozen wire messages (core/proto.rs).
+postcard = { version = "1", features = ["alloc"] }
 proptest = "1" # dev-only: property tests for the core invariants (I1–I5).

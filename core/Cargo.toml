@@ -15,6 +15,7 @@ name = "proctor_core"
 thiserror.workspace = true
 serde.workspace = true
 sha2.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

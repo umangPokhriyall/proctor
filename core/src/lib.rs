@@ -12,7 +12,7 @@
 //! - [`lease`]  — the [`lease::Lease`] with its fencing epoch and the pure expiry predicate.
 //! - [`task`]   — `TaskKind { Transcode, Stitch }`, strictly distinct.
 //! - [`commit`] — Merkle commit-reveal over opaque leaves.
-//! - `state`    — the `Task` state machine and `apply` (Session 3).
+//! - [`state`]  — the `Task` state machine and the pure `apply` transition.
 //! - `proto`    — the frozen wire messages and canonical encode/decode (Session 4).
 //!
 //! ============================================================================
@@ -24,12 +24,19 @@
 pub mod commit;
 pub mod id;
 pub mod lease;
+pub mod state;
 pub mod task;
 
 pub use commit::{Challenge, Commitment, LeafIndex, MerkleProof, Reveal};
 pub use id::{Epoch, JobId, LogicalTime, OutputRef, SegmentId, TaskId, WorkerId};
 pub use lease::Lease;
-pub use task::{Codec, Container, RenditionId, SegmentRef, StitchSpec, TargetProfile, TaskKind, TranscodeSpec};
+pub use state::{
+    FailureReason, ReputationDelta, Task, TaskAction, TaskEvent, TaskState, TransitionError,
+    MAX_RETRIES,
+};
+pub use task::{
+    Codec, Container, RenditionId, SegmentRef, StitchSpec, TargetProfile, TaskKind, TranscodeSpec,
+};
 
 // ---------------------------------------------------------------------------
 // Phase 0 residue — shape-only stubs not yet modularized. Retained here only so

@@ -1,0 +1,83 @@
+proctor — tier-2 no-plaintext-on-disk audit (phase2-spec.md §7.2)
+================================================================
+
+What this proves
+----------------
+During a full `decrypt_into_memfd -> transcode_no_disk -> encrypt` cycle, the
+plaintext segment exists ONLY behind `memfd_create` (anonymous RAM). The only
+*writable* regular files on a real filesystem are the ciphertext `.enc` blobs.
+ffmpeg reads and writes the plaintext exclusively through `/proc/self/fd/N`
+handles that resolve to those memfds — never a disk path. This is the evidence
+that refutes the deleted `WORKER_SECURITY.md`, which claimed "zero-knowledge"
+while writing the full plaintext segment to `input.mp4` on disk.
+
+This is the stronger, syscall-level tier. The portable tier-1 fd-enumeration
+test (`crypto/tests/no_disk.rs`, always runs) asserts the same property from the
+worker's fd table. Together they are cited by `docs/THREAT-MODEL.md §4`.
+
+How this was generated (reproducible)
+-------------------------------------
+  $ cargo build --example no_disk_cycle
+  $ strace -f -e trace=openat,open,creat,memfd_create \
+      -o trace.txt target/debug/examples/no_disk_cycle
+
+See `bench/results/crypto/regen-no-disk-audit.sh`. `strace` was present, so this
+audit was generated (not skipped). If `strace` is absent the reproducer prints a
+loud, recorded skip note and writes no audit — the trace is never fabricated.
+
+Host / tools
+------------
+  kernel  : Linux 7.0.0-22-generic x86_64
+  ffmpeg  : 8.0.1-3ubuntu2
+  strace  : 6.19
+  date    : 2026-06-10 (UTC)
+  corpus  : bench/corpus/gradient.mp4 (H.264, the seed segment)
+  profile : H.264 640x360 @ 800 kbps, MP4 container
+
+Honest scoping of the seed read
+-------------------------------
+The corpus mp4 is read ONCE, `O_RDONLY`, to seed the cycle — this stands in for
+content arriving over TLS in production, where the worker receives ciphertext and
+never reads plaintext from disk. It is a read, not a write, and it is the only
+plaintext file touched. We disclose it rather than hide it. No plaintext is ever
+opened for WRITING; the transcode path's plaintext lives only in anonymous RAM.
+
+Evidence — the complete set of relevant syscalls
+------------------------------------------------
+PID 22827 is the worker process; PID 22828 is the ffmpeg child (`strace -f`
+follows the fork; ffmpeg's worker threads appear as further pids and open no
+disk files — see the verdict checks below).
+
+  memfd_create — plaintext lives ONLY here (anonymous RAM):
+    22827 memfd_create("proctor-source", MFD_CLOEXEC) = 3
+    22827 memfd_create("proctor-output", MFD_CLOEXEC) = 4
+
+  Writable regular files — ONLY the ciphertext blobs:
+    22827 openat(AT_FDCWD, ".../source.enc", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 3
+    22827 openat(AT_FDCWD, ".../output.enc", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 5
+
+  ffmpeg child — plaintext I/O is via the inherited memfds, never a disk path:
+    22828 openat(AT_FDCWD, "/proc/self/fd/3", O_RDONLY)                 = 5   # input memfd
+    22828 openat(AT_FDCWD, "/proc/self/fd/4", O_WRONLY|O_CREAT|O_TRUNC) = 6   # output memfd
+
+  Seed read (disclosed, O_RDONLY — content delivery stand-in):
+    22827 openat(AT_FDCWD, ".../bench/corpus/gradient.mp4", O_RDONLY|O_CLOEXEC) = 3
+
+  Other (non-plaintext): /dev/null O_WRONLY (the child's null stdout), and the
+  dynamic-linker/locale/ffmpeg shared-object opens, all O_RDONLY.
+
+Verdict
+-------
+  [PASS] Plaintext appears only via memfd_create (2 anonymous RAM files).
+  [PASS] The only writable regular files are the ciphertext .enc blobs.
+  [PASS] ffmpeg reads/writes plaintext only through /proc/self/fd/N -> memfd.
+  [PASS] No plaintext file is ever opened for writing, by any pid.
+  [NOTE] One plaintext file is read O_RDONLY (the corpus seed) — disclosed above.
+
+Residual (NOT defended; stated, not hidden)
+-------------------------------------------
+memfd pages are anonymous and CAN swap under memory pressure — a disk surface.
+Keys are always mlock'd; for plaintext memfds the worker must run swap-off or
+under a memory-locked cgroup (deployment requirement). A root-capable worker
+defeats confidentiality entirely (it can ptrace ffmpeg or read the memfd via
+/proc). Closing that gap is the microVM flagship's mandate. See THREAT-MODEL.md.

@@ -1,53 +1,51 @@
-//! proctor `crypto` — in-memory, shard-scoped AES-256-GCM.
+//! proctor `crypto` — in-memory, shard-scoped AES-256-GCM (phase2-spec.md).
 //!
-//! Contract: per-segment keys are delivered over TLS, held `mlock`'d (no swap),
-//! decrypted into **anonymous memory** (never disk), fed to ffmpeg over a pipe/`memfd`,
-//! and zeroized on drop. This crate must never write plaintext or a key to disk, and
-//! never log a key.
+//! Per-segment keys are delivered over TLS, held `mlock`'d (no swap), and zeroized
+//! on drop ([`key::SecretKey`]); each segment is sealed with AES-256-GCM under a
+//! fresh 96-bit nonce, bound by AAD to its `(JobId, SegmentId, Role)` identity
+//! ([`aead`]). Decryption returns plaintext only inside an `mlock`'d, zeroizing
+//! [`aead::SecretBuf`]. This crate never writes a key or plaintext to disk and
+//! never logs key material.
 //!
-//! Phase 0 declares **shape only** — every body is `todo!()`. The real implementation
-//! (and the `aes-gcm` / `zeroize` deps) lands in Phase 2.
+//! **The unsafe boundary (phase2-spec.md §2).** `mlock`/`munlock` (and, in
+//! Session 2, `memfd_create`) are libc FFI, so a zero-unsafe invariant is
+//! impossible here. Instead the crate root is `#![deny(unsafe_code)]` and the
+//! single [`sys`] module carries `#![allow(unsafe_code)]` with a `// SAFETY:`
+//! comment on every block. Every other crate keeps `#![forbid(unsafe_code)]`.
+//!
+//! Session 1 lands [`key`] and [`aead`]; the `memfd`/`transcode` no-disk path
+//! lands in Session 2.
+
+#![deny(unsafe_code)]
 
 use thiserror::Error;
 
-/// A zeroize-on-drop buffer for plaintext that must never touch disk.
-pub struct SecretBuf {
-    /// Plaintext bytes — `mlock`'d and zeroized on drop. Read by the ffmpeg pipe in Phase 2.
-    #[allow(dead_code)] // Phase 2 wires the mlock'd buffer + zeroize-on-drop.
-    bytes: Vec<u8>,
-}
+pub mod aead;
+pub mod key;
+mod sys;
 
-/// A per-segment AES-256 key: `mlock`'d, never logged, never written to disk, zeroized on drop.
-pub struct SegmentKey {
-    #[allow(dead_code)] // Phase 2 wires the mlock'd key material + zeroize-on-drop.
-    key: [u8; 32],
-}
+pub use aead::{decrypt, encrypt, EncryptedSegment, Role, SecretBuf, SegmentAad};
+pub use key::SecretKey;
 
-/// Decrypt ciphertext into anonymous memory (never disk). The key is `mlock`'d and zeroized after use.
-pub fn decrypt_in_memory(ciphertext: &[u8], key: &SegmentKey) -> Result<SecretBuf, CryptoError> {
-    let _key = key;
-    todo!("Phase 2: AES-256-GCM decrypt to anonymous memory ({} bytes)", ciphertext.len())
-}
-
-/// Encrypt plaintext in RAM before any buffer touches storage.
-pub fn encrypt_in_memory(plaintext: &SecretBuf, key: &SegmentKey) -> Result<Vec<u8>, CryptoError> {
-    let _inputs = (plaintext, key);
-    todo!("Phase 2: in-RAM AES-256-GCM encrypt")
-}
-
-/// Errors surfaced by the in-memory crypto path.
+/// Errors surfaced by the in-memory crypto path. Authentication failure is the
+/// security-critical one: it returns `Err` and never yields plaintext.
 #[derive(Debug, Error)]
 pub enum CryptoError {
-    /// AES-GCM authentication tag verification failed (ciphertext tampered or wrong key).
+    /// AES-GCM authentication failed — wrong key, nonce, tag, or AAD, or tampered
+    /// ciphertext. No plaintext is returned.
     #[error("AES-GCM authentication failed")]
     AuthFailed,
-    /// Locking the key/plaintext into RAM (`mlock`) failed.
-    #[error("mlock failed")]
+    /// Pinning key/plaintext pages into RAM (`mlock`) failed — e.g. `RLIMIT_MEMLOCK`.
+    /// A secret that could swap to disk is never silently accepted.
+    #[error("mlock failed (check RLIMIT_MEMLOCK)")]
     MlockFailed,
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn builds() {}
+    /// The OS CSPRNG (`getrandom`) failed to produce key or nonce bytes.
+    #[error("OS CSPRNG (getrandom) failed")]
+    Csprng,
+    /// A buffer presented as an `EncryptedSegment` is too short to be valid.
+    #[error("malformed encrypted segment")]
+    Malformed,
+    /// AES-GCM encryption failed (e.g. plaintext exceeds the GCM length bound).
+    #[error("AES-GCM encryption failed")]
+    Encrypt,
 }

@@ -19,3 +19,8 @@ sha2 = "0.10" # SHA-256 for the Merkle commit-reveal (core/commit.rs).
 # Canonical, deterministic codec for the frozen wire messages (core/proto.rs).
 postcard = { version = "1", features = ["alloc"] }
 proptest = "1" # dev-only: property tests for the core invariants (I1–I5).
+# Phase 2 (crypto): in-memory AES-256-GCM with mlock'd, zeroizing key material.
+aes-gcm = "0.10"                                  # AES-256-GCM AEAD; runtime AES-NI detection.
+zeroize = { version = "1", features = ["derive"] } # volatile, un-elidable zeroization.
+getrandom = "0.2"                                 # OS CSPRNG for key + nonce bytes (no `rand`).
+libc = "0.2"                                      # mlock/munlock (+ memfd later); only in sys.rs.

@@ -7,3 +7,9 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Phase 2 (phase2-spec.md §2). The frozen `core` ids form the AEAD AAD.
+proctor_core = { package = "core", path = "../core" }
+aes-gcm.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+libc.workspace = true

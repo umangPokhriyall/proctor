@@ -10,7 +10,7 @@
 // Phase 0 scaffold: the entry points below are stubs wired up in Phase 5.
 #![allow(dead_code)]
 
-use crypto::{decrypt_in_memory, SegmentKey};
+use crypto::SecretKey;
 use proctor_core::{Commitment, Lease};
 
 fn main() {
@@ -18,9 +18,9 @@ fn main() {
 }
 
 /// Run one leased segment end-to-end and return the committed output hash.
-fn run_segment(lease: Lease, key: &SegmentKey, ciphertext: &[u8]) -> Commitment {
+fn run_segment(lease: Lease, key: &SecretKey, ciphertext: &[u8]) -> Commitment {
     // Phase 5: decrypt to anonymous memory, ffmpeg over pipes, encrypt in RAM, commit the hash.
-    let _decrypted = decrypt_in_memory(ciphertext, key);
+    let _inputs = (key, ciphertext);
     let _lease = lease;
     todo!("Phase 5: lease -> decrypt -> ffmpeg(pipe) -> encrypt -> commit")
 }

@@ -1,0 +1,9 @@
+# Rust build artifacts
+/target
+
+# Local blob store / bench scratch (single-host run, never committed)
+/bench/blob-store/
+/bench/results/scratch/
+
+# Local-only overrides
+*.local

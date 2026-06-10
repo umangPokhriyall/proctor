@@ -1,0 +1,15 @@
+[package]
+name = "core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The package is `core` (per the spec's crate list), but the *library target* is
+# `proctor_core`: a Rust crate literally named `core` shadows the std `core` crate in
+# rustdoc's doctest harness. Dependents import it as `proctor_core`.
+[lib]
+name = "proctor_core"
+
+[dependencies]
+thiserror.workspace = true

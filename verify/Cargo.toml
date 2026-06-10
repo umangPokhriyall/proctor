@@ -1,0 +1,10 @@
+[package]
+name = "verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+proctor_core = { package = "core", path = "../core" }

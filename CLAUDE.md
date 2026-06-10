@@ -9,12 +9,12 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 ## Authoritative specs (read before any work)
 - docs/specs/kickoff-brief.md  — strategy, primitives, DoD, synergy
 - docs/specs/phase0-spec.md    — genesis + skeleton
-- docs/specs/phase1-spec.md    — CURRENT: proctor_core state machine + protocol (FREEZE)
+- docs/specs/phase1-spec.md    — proctor_core (FROZEN @ v0.1.0-core-frozen)
+- docs/specs/phase2-spec.md    — CURRENT: crypto (in-memory AES-256-GCM, no disk)
 
 ## Frozen
-- proctor_core is FROZEN after Phase 1's tag v0.1.0-core-frozen. It must drive
-  crypto/verify/sched/verifier/worker UNCHANGED. If a later phase seems to need a
-  core change, the later phase is wrong — STOP and ask.
+- proctor_core is FROZEN. crypto consumes core::{TargetProfile, JobId, SegmentId, ...}
+  UNCHANGED. If a phase seems to need a core change, the phase is wrong — STOP and ask.
 
 ## Locked decisions (do not relitigate)
 1. Rust in the measured path. No async runtime in sched/worker/crypto/verify hot paths.
@@ -25,15 +25,22 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 6. Trusted-verifier capacity + probabilistic sampling. Never verify on untrusted workers.
 7. core is SANS-IO and is FROZEN at the end of Phase 1. Until then, shape only.
 
-## Hard rules (Phase 1)
-1. core is SANS-IO: no std::net/fs/time, no tokio/redis/rand, no logging, no
-   key material, no plaintext. Time and randomness are inputs.
-2. TaskKind = { Transcode, Stitch } — distinct variants, never string prefixes.
-3. Lease carries a monotonic Epoch (fencing token). Stale-epoch holder-actions
-   are REJECTED, state unchanged. This kills the zombie-worker class of bug.
-4. Task::apply implements the §6.2 table exactly. Deterministic, pure.
-5. Phase 1 deps (core): sha2, serde, postcard, thiserror; proptest dev-only.
-   Add nothing else.
+## Hard rules (Phase 2)
+1. Keys: 256-bit, mlock'd (fail construction if mlock fails), ZeroizeOnDrop, redacted
+   Debug, NO Serialize/Display/disk/log surface. Per-segment unique.
+2. AES-256-GCM: 12-byte random nonce; AAD bound to (JobId, SegmentId, Role). Auth
+   failure returns Err, never plaintext. Single-shot per GOP-bounded segment.
+3. Plaintext NEVER on a disk-backed file. Decrypt into a memfd (anonymous RAM);
+   ffmpeg reads/writes /proc/self/fd/N only. memfd zeroized + closed on every exit.
+   Swap is a disk surface: keys mlock'd; workers run swap-off / memory-locked cgroup.
+4. UNSAFE only in crypto/src/sys.rs (#[allow(unsafe_code)], // SAFETY: on each block).
+   crypto root #![deny(unsafe_code)]; every other crate #![forbid(unsafe_code)].
+5. Phase 2 deps (crypto): aes-gcm, zeroize, libc, getrandom (+ proctor_core, thiserror).
+   No tokio/async/redis/rand.
+6. No DoD-5220 / global.gc() theater. The property is "plaintext only in anonymous RAM,
+   overwritten on exit" — proven by the §7 fd-enumeration test, not ritual.
+7. Measure, never guess: commit AEAD GB/s, latency distributions (p50/p99/p99.9), and
+   crypto-as-%-of-transcode to bench/results/crypto/. Writing Standard applies.
 
 ## Crypto/honesty rules
 - Plaintext NEVER on disk; keys NEVER on disk; keys mlock'd and zeroized (not buf.fill(0)).
@@ -43,14 +50,14 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 ## Dependency allowlist (per phase; add nothing else)
 - Phase 0: thiserror only (if needed). No aes-gcm, no redis, no ssim crate yet.
 - Phase 1 (core): sha2, serde, postcard, thiserror; proptest dev-only.
+- Phase 2 (crypto): aes-gcm, zeroize, libc, getrandom (+ proctor_core, thiserror).
 - Later phases add their deps when reached, recorded here at that time.
 
-## Commit discipline (from Phase 1 on, Claude Code commits)
-- Conventional Commits: <type>(core): <imperative>, <=72 chars. Body cites the spec.
-- Atomic, one logical change per commit, on a GREEN tree (build+clippy -D warnings+test).
-- Never commit red. No --no-verify. No force-push/rewrite of main. No secrets/binaries.
+## Commit discipline (Claude Code commits)
+- Conventional Commits <type>(crypto): ..., atomic, GREEN tree, body cites the spec.
+- Never commit red / secrets / media / large binaries. No --no-verify, no force-push.
 - Freeze = final commit + annotated tag v0.1.0-core-frozen.
 
 ## Scope discipline
 Work ONLY on the given session. End with build+clippy+test, the commit(s), a change
-list, and STOP. Never touch a future phase's scope.
+list, and STOP. Never touch a future phase or core/.

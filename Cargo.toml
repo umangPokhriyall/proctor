@@ -15,3 +15,4 @@ thiserror = "2"
 # Phase 1 (core): the protocol types are the wire contract, so their serialized
 # shape is frozen. Added per-session as the modules that use them land.
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10" # SHA-256 for the Merkle commit-reveal (core/commit.rs).

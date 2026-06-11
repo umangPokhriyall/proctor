@@ -1,34 +1,58 @@
-//! proctor `sched` — the I/O-bound control plane.
+//! proctor `sched` — the epoch-fenced control-plane binary.
 //!
-//! Redis-lease least-loaded **push** dispatch, heartbeat-extends-lease, the single
-//! `XAUTOCLAIM` reclaim authority, explicit saturation backpressure, and a reputation
-//! gate. All coordination state lives in Redis — never an in-process worker map.
-//!
-//! Phase 0 is a scaffold; the control plane lands in Phase 4.
+//! Wires the Session-5 engine over a [`Store`]: a Redis store when `PROCTOR_REDIS_URL` is
+//! set and reachable, else the in-memory store (single host, locked decision #5). It then
+//! spins the dispatch + single-reclaim loops. There is no ingest API (locked decision #2):
+//! the bench injector and the real worker/verifier bins (Phase 5) feed the loops; the live
+//! single-host run and chaos sims are Phase 6. This wiring proves the loops run end-to-end.
 
-// Phase 0 scaffold: the entry points below are stubs wired up in Phase 4.
-#![allow(dead_code)]
+#![forbid(unsafe_code)]
 
-use proctor_core::{Lease, WorkerId};
+use proctor_core::LogicalTime;
+use sched::engine::{Engine, EngineConfig};
+use sched::loops;
+use sched::sample::Sampler;
+use sched::store::{MemoryStore, RedisStore, Store};
 
 fn main() {
-    eprintln!("proctor sched — Phase 0 stub; control plane lands in Phase 4");
+    match std::env::var("PROCTOR_REDIS_URL") {
+        Ok(url) => match RedisStore::connect(&url, "proctor:sched") {
+            Ok(store) => {
+                eprintln!("proctor sched: Redis store at {url}");
+                run(store);
+            }
+            Err(e) => {
+                eprintln!("proctor sched: Redis unavailable ({e}); falling back to in-memory store");
+                run(MemoryStore::new());
+            }
+        },
+        Err(_) => {
+            eprintln!("proctor sched: in-memory store (set PROCTOR_REDIS_URL to use Redis)");
+            run(MemoryStore::new());
+        }
+    }
 }
 
-/// Place a ready segment on the least-loaded eligible worker (push dispatch).
-fn dispatch(candidate: WorkerId) -> Option<Lease> {
-    todo!("Phase 4: least-loaded push dispatch (candidate = {candidate:?})")
-}
-
-/// The single lease-expiry reclaim authority (`XAUTOCLAIM`) — the sole writer of both
-/// DB state and stream state, so they cannot diverge.
-fn reclaim() {
-    todo!("Phase 4: single lease-expiry reclaim path")
-}
-
-/// Apply backpressure when the global queue saturates (shed vs block — decided + documented).
-fn backpressure() {
-    todo!("Phase 4: explicit saturation backpressure")
+/// Build the engine and spin a few bounded dispatch + reclaim ticks. No workers or tasks
+/// are injected here — the bench injector and the Phase 5 worker/verifier bins drive the
+/// loops; the live single-host run is Phase 6. This confirms the wiring runs without panic.
+fn run<S: Store>(store: S) {
+    let engine = Engine::new(store, EngineConfig::for_workers(4), Sampler::from_entropy());
+    for t in 0..3u64 {
+        let now = LogicalTime(t);
+        if let Err(e) = loops::dispatch_tick(&engine, now) {
+            eprintln!("proctor sched: dispatch tick failed: {e}");
+            return;
+        }
+        if let Err(e) = loops::reclaim_tick(&engine, now) {
+            eprintln!("proctor sched: reclaim tick failed: {e}");
+            return;
+        }
+    }
+    eprintln!(
+        "proctor sched: engine wired (Phase 4 Session 5). Real worker/verifier bins are \
+         Phase 5; the live single-host run is Phase 6."
+    );
 }
 
 #[cfg(test)]

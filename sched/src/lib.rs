@@ -21,13 +21,22 @@
 //! sizing + shed-at-saturation, §6). **Session 4** (this commit) adds the adaptive policy:
 //! [`reputation`] (tiers, the asymmetric standing updates, and the tier→`p` mapping with
 //! the hard `P_MIN` floor, §5) and [`sample`] (`Bernoulli(p_tier)` over an injectable RNG,
-//! §5.3). Later sessions add the `core`-driven engine, the dispatch/reclaim loops, and the
-//! simulated harness.
+//! §5.3). **Session 5** (this commit) ties them together: [`engine`] (load task →
+//! `core::Task::apply(ev)` → execute the returned `TaskAction`s against the store;
+//! content-addressed release anchored by the `Commitment`, §7), [`loops`] (the dispatch
+//! loop and the single reclaim loop, §8), the `#[cfg(test)]` `sim` harness (a simulated
+//! worker/verifier over `core::proto`), and the `main.rs` wiring. The real worker and
+//! verifier binaries are Phase 5; the live single-host run and chaos sims are Phase 6.
 
 #![forbid(unsafe_code)]
 
 pub mod backpressure;
+pub mod engine;
+pub mod loops;
 pub mod place;
 pub mod reputation;
 pub mod sample;
 pub mod store;
+
+#[cfg(test)]
+mod sim;

@@ -13,8 +13,10 @@
 //! **Session 1** landed the two leaf primitives: [`ssim`] (single-scale SSIM over luma)
 //! and [`frame`] (Y-plane extraction over the no-disk ffmpeg path). **Session 2** added
 //! [`binding`] (the enforced single-leaf commit chain → content-addressed `OutputRef`)
-//! and [`compare`] (the per-segment verify flow). **Session 3** adds [`detection`] (the
-//! exact hypergeometric detection-probability family with the `P_MIN` floor). `roc` follows.
+//! and [`compare`] (the per-segment verify flow). **Session 3** added [`detection`] (the exact
+//! hypergeometric detection-probability family with the `P_MIN` floor). **Session 4** adds [`roc`]
+//! (calibration/held-out split, FAR/FRR with Clopper–Pearson intervals, threshold selection) and
+//! the `verify_eval` study.
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +26,7 @@ pub mod binding;
 pub mod compare;
 pub mod detection;
 pub mod frame;
+pub mod roc;
 pub mod ssim;
 
 pub use binding::check_binding;
@@ -32,6 +35,9 @@ pub use compare::{
 };
 pub use detection::{p_detect_binomial, p_detect_hypergeometric, P_MIN};
 pub use frame::{extract_y_frame, Frame};
+pub use roc::{
+    clopper_pearson, rates, select_threshold_youden, Class, DataSet, Sample, Stratum, Variant,
+};
 pub use ssim::ssim;
 
 /// Errors surfaced by the verification path.

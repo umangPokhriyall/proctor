@@ -1,0 +1,4 @@
+stratum,honest_n,false_rejects,frr,ci95_low,ci95_high
+smooth_gradient,4,0,0.000000,0.000000,0.602365
+high_detail,4,0,0.000000,0.000000,0.602365
+high_motion,4,1,0.250000,0.006309,0.805880

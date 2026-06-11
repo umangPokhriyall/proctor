@@ -9,11 +9,12 @@ publish.workspace = true
 thiserror.workspace = true
 proctor_core = { package = "core", path = "../core" }
 # Phase 3 (phase3-spec.md §2): frame extraction runs over crypto's no-disk ffmpeg
-# primitive so verify itself stays #![forbid(unsafe_code)]. Remaining math/ROC deps
-# (statrs) land with the session that introduces them.
+# primitive so verify itself stays #![forbid(unsafe_code)].
 crypto = { path = "../crypto" }
 # Session 2: SHA-256 of the ciphertext blob for the single-leaf commit binding;
 # serde + serde_json to read roc-threshold.json (the threshold is never a literal).
 sha2.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# Session 4: Beta quantiles for the 95% Clopper–Pearson FAR/FRR intervals (roc.rs).
+statrs.workspace = true

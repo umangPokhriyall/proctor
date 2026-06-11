@@ -1,0 +1,4 @@
+stratum,worker_transcode_s,reference_transcode_s,encode_ratio,frame_extract_ssim_s,sampled_frame_pairs,extract_per_pair_ms,full_cost_ratio
+smooth_gradient,0.1331,0.1549,1.1633,1.5032,16,93.95,12.4540
+high_detail,0.1868,0.2225,1.1911,1.5937,16,99.60,9.7237
+high_motion,0.2355,0.2877,1.2217,1.5384,16,96.15,7.7544

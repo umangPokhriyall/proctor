@@ -26,3 +26,5 @@ getrandom = "0.2"                                 # OS CSPRNG for key + nonce by
 libc = "0.2"                                      # mlock/munlock (+ memfd later); only in sys.rs.
 # Phase 3 (verify): read the committed ROC threshold file; emit study artifacts.
 serde_json = "1"
+# Phase 3 (verify): Beta quantiles for Clopper–Pearson FAR/FRR intervals (roc.rs).
+statrs = "0.18"

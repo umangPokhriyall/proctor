@@ -1,0 +1,13 @@
+{
+  "calibration_attack_n": 48,
+  "calibration_honest_n": 12,
+  "comparison_geometry": "160x120",
+  "corpus_sha256": "4737e508ed19452cd746cd3e8e2dc3f9384d14fa42fbb8f21499b2ad7277d152",
+  "criterion": "youden_j",
+  "date": "2026-06-11",
+  "ffmpeg": "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+  "provenance": "criterion=youden_j; corpus_sha256=4737e508ed19452cd746cd3e8e2dc3f9384d14fa42fbb8f21499b2ad7277d152; ffmpeg=ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers; date=2026-06-11; calibration_honest_n=12; calibration_attack_n=48; comparison_geometry=160x120; score=min_mssim",
+  "score": "min_mssim",
+  "value": 0.9327668870834727,
+  "youden_j": 0.7916666666666666
+}

@@ -11,9 +11,10 @@
 //! confined to `crypto::sys` and no media ever lands on a disk-backed file.
 //!
 //! **Session 1** landed the two leaf primitives: [`ssim`] (single-scale SSIM over luma)
-//! and [`frame`] (Y-plane extraction over the no-disk ffmpeg path). **Session 2** adds
+//! and [`frame`] (Y-plane extraction over the no-disk ffmpeg path). **Session 2** added
 //! [`binding`] (the enforced single-leaf commit chain → content-addressed `OutputRef`)
-//! and [`compare`] (the per-segment verify flow). `detection` and `roc` follow.
+//! and [`compare`] (the per-segment verify flow). **Session 3** adds [`detection`] (the
+//! exact hypergeometric detection-probability family with the `P_MIN` floor). `roc` follows.
 
 #![forbid(unsafe_code)]
 
@@ -21,6 +22,7 @@ use thiserror::Error;
 
 pub mod binding;
 pub mod compare;
+pub mod detection;
 pub mod frame;
 pub mod ssim;
 
@@ -28,6 +30,7 @@ pub use binding::check_binding;
 pub use compare::{
     verify_segment, RocThreshold, SamplePlan, SegmentInputs, Verdict, ROC_THRESHOLD_PATH,
 };
+pub use detection::{p_detect_binomial, p_detect_hypergeometric, P_MIN};
 pub use frame::{extract_y_frame, Frame};
 pub use ssim::ssim;
 

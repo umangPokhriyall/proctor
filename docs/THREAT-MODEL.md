@@ -52,12 +52,50 @@
        leading 128 bits of the blob hash), so a release that references the `OutputRef`
        references the exact verified bytes — closing the verified-then-swapped TOCTOU.
        The store-level content-addressed release and the **fencing token** that also
-       rejects a zombie worker's late re-commit land in Phase 4 (amendment §1.1); a
-       heartbeat timeout is a liveness heuristic there, never the safety mechanism.
+       rejects a zombie worker's late re-commit landed in Phase 4 (amendment §1.1; see the
+       Liveness section below); a heartbeat timeout is a liveness heuristic there, never
+       the safety mechanism.
     Evidence: `verify/src/binding.rs` (a blob mutated after committing is rejected) and
     `verify/src/compare.rs` (binding precedes frame sampling on every path).
-- Liveness (sched, §2.3 kickoff): a dead worker never strands a task; a flood never
-  grows memory unbounded.
+- Liveness (sched, §2.3 kickoff): a dead worker never strands a task, a slow-but-alive
+  worker never double-commits one, and a flood never grows memory unbounded.
+  - **Fencing tokens — a heartbeat timeout is a liveness heuristic, never a safety
+    mechanism (Phase 4, amendment §1.1).** The legacy single-reclaim path prevents
+    *stranded* tasks but not *zombie writes*: a slow worker that misses heartbeats is
+    reclaimed and its task re-dispatched, then finishes and commits anyway — two outputs
+    racing for one segment. Reclaim is **liveness** (re-dispatch a missed task); **safety
+    is the fencing token**. Every (re)lease mints a strictly-greater monotonic `Epoch`
+    (frozen into `core`); every holder-action write carries its lease epoch; and the
+    durable store applies a write **iff** its epoch matches the current lease, atomically —
+    a compare-and-set that rejects any stale-epoch write with **no mutation**, mirroring
+    `core::Task::apply`'s `StaleEpoch` into the durable layer. So a revived zombie's late
+    `submit`/`heartbeat` is rejected *at the store*; **exactly one output exists per
+    segment**, and release is content-addressed (`OutputRef` = the committed blob hash), so
+    the late blob cannot be substituted post-verification either — this pairs with the §4
+    commit-binding chain to close the verified-then-swapped TOCTOU. A timeout can never be
+    the safety mechanism because "missed a heartbeat" and "is still running" are
+    indistinguishable to the scheduler; only the epoch ordering is decisive.
+  - **Identical bug class to Coingate §1.2 (the `XAUTOCLAIM`-steal).** That portfolio's
+    failure was a *second* reclaim path — a stream consumer that could `XAUTOCLAIM` a
+    pending entry a superseded holder was still acting on, letting a stale holder mutate
+    state. `proctor` forecloses it two ways, structurally: there is a **single reclaim
+    authority** (`reclaim_expired`: epoch-bump + re-enqueue) and **no stream-PEL /
+    `XAUTOCLAIM` second path**; and even a stolen or replayed write is inert because the
+    epoch CAS rejects it. Same bug class, closed by construction — the portfolio-level
+    coherence is itself the signal.
+  - **Backpressure — a flood stays bounded (Phase 4, amendment §1.4).** Per-worker
+    in-flight and global ready-queue caps are sized by **Little's law** `L = λ × W`
+    (`W ≈ 0.099 s`, the measured transcode wall time); at the global cap intake **sheds**
+    rather than buffering, so resident work is `O(N)` regardless of offered load.
+  - Evidence: the differential store oracle's slow-zombie proof runs against **both** the
+    in-memory reference and the Redis Lua store —
+    `sched/src/store/contract.rs::{slow_zombie_submit_rejected, heartbeat_after_reclaim_rejected}`
+    (re-lease at `e2 > e1`; the zombie's `submit@e1` / `heartbeat@e1` rejected as
+    `StaleEpoch`; exactly one `Accepted` output). The end-to-end version is
+    `sched/src/sim.rs::slow_zombie_submission_is_rejected_end_to_end`. Backpressure shed:
+    `sched/src/backpressure.rs` + `sched/src/sim.rs::dispatch_tick_drains_and_intake_sheds_at_the_cap`.
+    The process-level *chaos schedule* (pause a real worker past expiry, resume, assert one
+    output) lands in Phase 6.
 
 ## 5. Residual risks
 - (most filled from measured behavior in Phase 7)

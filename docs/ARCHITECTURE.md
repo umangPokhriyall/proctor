@@ -2,8 +2,9 @@
 
 > **Status:** grows as phases land. This file records design decisions and the reasons
 > behind them, declaratively, with every claim tied to code or a committed measurement.
-> **Phase 3** adds the verification design below; `sched` (dispatch, leases, the fencing
-> token, the adaptive policy) and the scheduler/bench decompositions follow in Phases 4–6.
+> **Phase 3** added the verification design; **Phase 4** adds the scheduler design below
+> (push dispatch, the fencing-token store, the adaptive policy, Little's-law sizing). The
+> scheduler/bench *measurements* (dispatch-latency p99, saturation) follow in Phase 6.
 
 ## Verification (Phase 3)
 
@@ -106,3 +107,102 @@ and name the optimization rather than assume it.
 capacity must be ≥ `p × worker_throughput`; at the `P_MIN = 0.02` floor that is ≈ 2% of
 worker throughput. This is why verification is a *separate, sized* tier, not a tax on every
 transcode.
+
+## Scheduling (Phase 4)
+
+`sched` is the honest control plane: a Redis-backed durable store with epoch-fenced
+compare-and-set, least-loaded **push** dispatch, a single reclaim authority, the adaptive
+tier→`p` policy with a hard floor, content-addressed release, and Little's-law-sized
+backpressure. It is `#![forbid(unsafe_code)]` with no async runtime in the path (locked
+decisions #1). The spine: **a heartbeat timeout is a liveness heuristic, never a safety
+mechanism** — fencing is safety (THREAT-MODEL §4, Liveness).
+
+### `core::Task::apply` is the transition authority
+
+The frozen `core` state machine *is* the scheduler's authority. The engine loads a task,
+calls `core::Task::apply(ev)` to get the canonical `TaskAction`s, persists the transition
+through the store, and executes those actions: `Requeue → enqueue_ready`,
+`NotifyAccepted → content-addressed release`, `EmitReputation → update_standing`. The
+store performs the **same** epoch CAS `apply` does — belt and suspenders, so even a
+restarted or racing `sched` instance cannot accept a stale write (`engine.rs`).
+
+### The Store discipline — one contract, two implementations
+
+The decision logic (placement, reputation, sampling, backpressure, engine) is written over
+a `Store` trait, free of Redis specifics. Two implementations are held to **one**
+`contract.rs` suite — the differential oracle: an in-memory reference that *inherits* its
+fencing from `core::Task::apply`, and a Redis store that **re-derives** the identical rule
+in `redis::Script` (Lua) over a hash/ZSET data model so each transition's read-compare-write
+is atomic with no `WATCH`/retry. The Redis Lua is correct *iff* it passes the same suite as
+the reference, including the slow-zombie proof. Both run identically (Redis tier gated on a
+reachable Redis; skipped loudly, never faked). `sched/src/store/{mod,memory,redis,contract}.rs`.
+
+### Fencing and the single reclaim authority
+
+Every (re)lease mints a strictly-greater monotonic `Epoch`; every holder-action write
+(`submit`, `extend_lease`) carries it; the store rejects any write whose epoch ≠ the current
+lease epoch, atomically (`StaleEpoch`, no mutation). `reclaim_expired` is the **single**
+authority — `ZRANGEBYSCORE 0 now` over a lease-deadline index plus a per-task Lua reclaim
+that returns the task to `Pending` and re-enqueues it — with **no stream-PEL / `XAUTOCLAIM`
+second path** (the legacy divergence is structurally absent; the Coingate §1.2 bug class,
+foreclosed). `LeaseExpired` keeps the high-water epoch, so the next lease is strictly
+greater and the zombie's stale epoch can never match.
+
+### Least-loaded push dispatch (`place.rs`)
+
+The scheduler is the single placement authority — workers receive, never self-select. For
+a ready task it picks the least-loaded **eligible** worker: primary metric is in-flight
+lease count, tie-broken by a higher EWMA of recent completion throughput (`α = 0.3`, a
+faster worker preferred at equal load). Eligibility = alive (recent heartbeat) ∧ reputation
+not `Suspended`/`Banned` ∧ under the per-worker in-flight cap. Task selection honours
+priority with **aging** — a task's effective priority rises one unit per `AGING_INTERVAL`
+of waiting — so a low-priority (e.g. 4K) task cannot starve under sustained higher-priority
+arrivals (the legacy strict-priority bug, fixed with arithmetic).
+
+### Adaptive policy with the `P_MIN` floor (`reputation.rs`, `sample.rs`)
+
+Reputation maps verifier verdicts to a standing, standing to a tier, and a tier to a
+sampling fraction `p`, with **asymmetric** updates — *fast to distrust, slow to trust* — the
+honest response to the measured held-out FAR ≈ 21% (effective detection `= P_hyper ×
+(1 − FAR)`, so one pass is weak evidence). A pass credits `+1` capped at the pristine
+baseline; a `FidelityBelowThreshold` fails by `−8`; a `CommitmentMismatch` is the
+**heaviest** (`−64` → `Banned` in one step: provable byte-swap cheating, not a fidelity
+judgement). `Suspended`/`Banned` workers are ineligible for dispatch — reputation *bites*,
+unlike the legacy observe-only system. Every non-terminal tier maps to `p ≥ P_MIN = 0.02`
+applied to **every** worker including pristine ones, so `k = ⌈p·n⌉ ≥ 1` always and **no
+worker is ever unsampled**; the eligible-tier values (`0.02 / 0.10 / 0.25`) are the Phase 3
+published-curve family (`verify::detection::TIERS`), and the floor equals
+`verify::detection::P_MIN`. Sampling is `Bernoulli(p_tier)` over an injectable RNG
+(OS-seeded in production, seeded/forced in tests).
+
+### Little's-law backpressure (`backpressure.rs`)
+
+Caps are arithmetic, not vibes: `L = λ × W` with `W ≈ 0.099 s` (the mean ffmpeg transcode
+wall time, measured single-host — `bench/results/crypto/crypto_pct_transcode.csv`, range
+0.059–0.179 s). Sizing for `N` workers at the saturation knee (`λ = N/W ⇒ L = N`) gives a
+**per-worker in-flight cap** `⌈L/N⌉ + headroom = 2` (one Little's-law slot + one pipeline
+slot so a worker isn't idle across the dispatch round trip) and a **global ready-queue cap**
+`queue_factor × ⌈L⌉ = 4N`. At the global cap, intake **sheds** (a `Backpressure` error the
+injector handles) rather than buffering, so resident work is `O(N)` regardless of offered
+load — memory stays flat under sustained overload (a Phase 6 assertion).
+
+### Verifier-capacity sizing
+
+Trusted-verifier capacity must be ≥ `Σ_workers p_tier × throughput × cost_multiplier`. At
+the `P_MIN = 0.02` floor and the **fundamental** 1.20× verification cost (one reference
+re-encode; § Verification cost above), that is ≈ **2.4%** of aggregate worker compute — the
+price of trust, cheap. The ≈ 10× per-frame-spawn artifact measured in Phase 3 would inflate
+it to ≈ 20%; the in-process-decode optimisation (the Phase 5 verifier binary) removes that,
+collapsing the cost toward the SSIM compute. The floor sets the *minimum* capacity; the tier
+policy raises it for distrusted workers.
+
+### Pre-committed dispatch-latency decomposition (Phase 6, amendment §1.4)
+
+Predicted before measuring, so Phase 6 confirms rather than discovers. One dispatch is **two
+Redis round trips** (`DISPATCH_REDIS_RTTS = 2`): the lease Lua (one `EVALSHA` doing the
+epoch-fenced `HSET` + lease-deadline `ZADD` + in-flight `HINCRBY` atomically) and the inbox
+`LPUSH` of the encoded `Assignment`. The in-process decision is a min-scan over the candidate
+workers (≈ µs). **Prediction: in-process decision ≈ X µs; p99 dispatch ≈ `2 × RTT` and is
+~95% Redis RTTs** — which preempts the dismissal "your scheduler is just Redis latency." The
+queue is Little's-law-sized (above); both are confirmed against committed distributions in
+Phase 6.

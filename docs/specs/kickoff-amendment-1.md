@@ -33,7 +33,7 @@ Directive (Phase 4):
 
 Four correctness gaps in the brief's §2.1, fixed:
 
-**1.2.1 — Exact hypergeometric, not binomial.** The brief's `1 − (1−p)^(f·n)` models sampling *with replacement*. The verifier samples `k = ⌈p·n⌉` of `n` segments *without* replacement; with `m = ⌈f·n⌉` tampered, `P(detect) = 1 − C(n−m, k)/C(n, k)`. At small `n` (short video, `n ≤ 32`) the binomial overstates detection. Commit both curves and the divergence plot; **publish the hypergeometric** as the claim.
+**1.2.1 — Exact hypergeometric, not binomial.** The brief's `1 − (1−p)^(f·n)` models sampling *with replacement*. The verifier samples `k = ⌈p·n⌉` of `n` segments *without* replacement; with `m = ⌈f·n⌉` tampered, `P(detect) = 1 − C(n−m, k)/C(n, k)`. At small `n` (short video, `n ≤ 32`) the binomial **under-states** detection. (Wording correction, folded in Phase 4: the original "overstates" had the sign backwards. Phase 3's committed `bench/results/verify/DETECTION.md` proves `hypergeometric ≥ binomial` — the divergence `binomial − hypergeometric ≤ 0` everywhere on the grid — so the binomial is the *conservative* curve. The decision below is unaffected.) Commit both curves and the divergence plot; **publish the hypergeometric** as the claim.
 
 **1.2.2 — Calibration/held-out split + confidence intervals.** A threshold chosen and scored on the same corpus is circular. Split `bench/corpus/` into a **calibration set** (threshold selection only) and a **disjoint held-out set** (reported FAR/FRR). Report **95% Clopper–Pearson** intervals on FAR/FRR given the finite held-out count. A point estimate ("FAR 0.3%" off 400 samples) without an interval is exactly the overclaim this repo repudiates.
 

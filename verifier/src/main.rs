@@ -22,7 +22,9 @@ fn main() {
 fn reexecute(segment: SegmentId, reference: &Frame, candidate: &Frame) -> f64 {
     // `segment` selects which sampled output to re-encode in Phase 3.
     let _sampled = segment;
-    ssim(reference, candidate)
+    // `ssim` now returns a Result (dimension mismatch is an error); the real per-segment
+    // flow lives in verify::compare (a later session). A mismatch ⇒ maximally dissimilar.
+    ssim(reference, candidate).unwrap_or(0.0)
 }
 
 #[cfg(test)]

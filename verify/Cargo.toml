@@ -8,3 +8,7 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 proctor_core = { package = "core", path = "../core" }
+# Phase 3 (phase3-spec.md §2): frame extraction runs over crypto's no-disk ffmpeg
+# primitive so verify itself stays #![forbid(unsafe_code)]. The math/ROC deps
+# (sha2, serde, serde_json, statrs) land with the sessions that introduce them.
+crypto = { path = "../crypto" }

@@ -804,6 +804,7 @@ name = "verify"
 version = "0.0.0"
 dependencies = [
  "core",
+ "crypto",
  "thiserror",
 ]
 

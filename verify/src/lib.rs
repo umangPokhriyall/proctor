@@ -1,66 +1,48 @@
-//! proctor `verify` — SSIM comparator, ROC threshold calibration, detection-probability
-//! math, and commit-reveal verification.
+//! proctor `verify` — the trusted re-execution comparator (phase3-spec.md).
 //!
-//! The comparator is **SSIM against a calibrated ROC threshold** (locked decision #4),
-//! not pHash: we measure *transcode fidelity* against cheap-downscale and frame-substitution
-//! attacks, which demands a structural metric. The threshold is read from a committed ROC
-//! file (Phase 3) — never a hardcoded constant.
+//! The comparator is **hand-rolled SSIM against a calibrated ROC threshold** (locked
+//! decision #4), not pHash: we measure *transcode fidelity* against cheap-downscale,
+//! wrong-bitrate, and frame-substitution attacks, which demands a structural metric.
+//! Every number is owned and explainable (measure-never-guess), not delegated to an
+//! opaque crate.
 //!
-//! This crate must never re-execute ffmpeg itself (that is the `verifier` binary's job) and
-//! must never know about transport.
+//! `verify` is `#![forbid(unsafe_code)]`. The only place it touches ffmpeg is through
+//! [`crypto::ffmpeg_no_disk`] (the no-disk memfd primitive), so all `unsafe` stays
+//! confined to `crypto::sys` and no media ever lands on a disk-backed file.
 //!
-//! Phase 0 declares **shape only** — every body is `todo!()`. Real logic + the SSIM dep
-//! land in Phase 3.
+//! **Session 1 (this commit)** lands the two leaf primitives: [`ssim`] (single-scale
+//! SSIM over luma) and [`frame`] (Y-plane extraction at a timestamp over the no-disk
+//! ffmpeg path). `binding`, `compare`, `detection`, and `roc` arrive in later sessions.
 
-use proctor_core::{Commitment, Reveal};
+#![forbid(unsafe_code)]
+
 use thiserror::Error;
 
-/// A decoded video frame (planar luma, for SSIM). Layout is finalized in Phase 3.
-pub struct Frame {
-    pub width: u32,
-    pub height: u32,
-    pub luma: Vec<u8>,
-}
+pub mod frame;
+pub mod ssim;
 
-/// A decision threshold read from the committed ROC study (Phase 3), with its provenance.
-/// Never a hardcoded number — `provenance` points at the `bench/results/` file it came from.
-pub struct RocThreshold {
-    pub value: f64,
-    pub provenance: String,
-}
-
-/// Structural-similarity score in `[0.0, 1.0]` between a reference frame and a candidate frame.
-pub fn ssim(reference: &Frame, candidate: &Frame) -> f64 {
-    todo!(
-        "Phase 3: SSIM ({}x{} vs {}x{})",
-        reference.width,
-        reference.height,
-        candidate.width,
-        candidate.height
-    )
-}
-
-/// Per-task detection probability `1 - (1 - p)^(f * n)` for sampling fraction `p`,
-/// tamper fraction `f`, and `n` segments. Backs the sampling-rate choice in Phase 3.
-pub fn detection_probability(p: f64, f: f64, n: u32) -> f64 {
-    todo!("Phase 3: detection-probability curve (p={p}, f={f}, n={n})")
-}
-
-/// Verify a worker's revealed commitment against the verifier-recomputed output hash.
-pub fn verify_commitment(reveal: &Reveal, recomputed: &Commitment) -> bool {
-    todo!("Phase 3: commit-reveal check ({reveal:?} vs {recomputed:?})")
-}
+pub use frame::{extract_y_frame, Frame};
+pub use ssim::ssim;
 
 /// Errors surfaced by the verification path.
 #[derive(Debug, Error)]
 pub enum VerifyError {
-    /// Reference and candidate frames have mismatched dimensions.
+    /// Two frames handed to [`ssim`] have different dimensions — SSIM is undefined
+    /// across mismatched planes. The caller (`compare`) extracts both at the same
+    /// `(w, h)`, so this is a programming error, never a worker-controlled input.
     #[error("frame dimension mismatch: {0:?} vs {1:?}")]
     DimensionMismatch((u32, u32), (u32, u32)),
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn builds() {}
+    /// A raw `gray` extraction returned a byte count other than `w * h` — the
+    /// decoded plane was truncated or the requested geometry was not honoured.
+    #[error("extracted frame is {got} luma bytes, expected w*h = {expected}")]
+    FrameSize {
+        /// The expected luma byte count (`width * height`).
+        expected: usize,
+        /// The byte count ffmpeg actually produced.
+        got: usize,
+    },
+    /// A failure in the underlying no-disk crypto/ffmpeg path (spawn, timeout,
+    /// non-zero exit, or memfd I/O).
+    #[error("no-disk ffmpeg/crypto failure: {0}")]
+    Crypto(#[from] crypto::CryptoError),
 }

@@ -7,3 +7,8 @@ publish.workspace = true
 
 [dependencies]
 proctor_core = { package = "core", path = "../core" }
+# Phase 4 allowlist (phase4-spec.md §2): proctor_core, redis, rand, thiserror.
+# Added per-session as the modules that use them land — Session 1 is the Store
+# trait + in-memory reference, so only thiserror joins now; `redis` arrives with
+# store/redis.rs (Session 2) and `rand` with sample.rs (Session 4).
+thiserror.workspace = true

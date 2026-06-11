@@ -8,11 +8,12 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 
 ## Authoritative specs (read before any work)
 - docs/specs/kickoff-brief.md + kickoff-amendment-1.md  — amendment changes the math
-- docs/specs/phase0/1/2-spec.md  — genesis, core (FROZEN), crypto
-- docs/specs/phase3-spec.md      — CURRENT: verify (SSIM, binding, hypergeometric, ROC)
+- docs/specs/phase0–3-spec.md  — genesis, core (FROZEN), crypto, verify (SSIM, binding, hypergeometric, ROC)
+- docs/specs/phase4-spec.md    — CURRENT: sched (epoch-fenced Redis store, push dispatch, policy, backpressure)
 
 ## Frozen
 - proctor_core FROZEN @ v0.1.0-core-frozen. git diff v0.1.0-core-frozen -- core/ MUST be empty.
+- core::Task::apply is the transition authority; sched executes the TaskActions it returns.
 - crypto is NOT frozen: §3.1 adds ffmpeg_no_disk additively; ALL Phase 2 crypto tests must stay green.
 
 ## Locked decisions (do not relitigate)
@@ -24,19 +25,21 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 6. Trusted-verifier capacity + probabilistic sampling. Never verify on untrusted workers.
 7. core is SANS-IO and is FROZEN at the end of Phase 1. Until then, shape only.
 
-## Hard rules (Phase 3)
-1. verify is #![forbid(unsafe_code)]. All unsafe stays only in crypto::sys.
-2. Commitment binding = core::Commitment::commit(&[SHA-256(ciphertext)]) (single leaf, frozen API).
-   Check binding BEFORE choosing challenge frames. Release is content-addressed (OutputRef = blob hash).
-3. Comparator is hand-rolled SSIM on luma. No SSIM crate. Document window + C1/C2.
-4. Detection is EXACT HYPERGEOMETRIC: P=1−C(n−m,k)/C(n,k). Binomial only for the divergence plot.
-   Publish a family P_detect(f,n;p_tier) with a hard floor P_MIN (k≥1 for every worker, incl. pristine).
-5. Threshold comes from bench/results/verify/roc-threshold.json, NEVER a literal. VerifyDetail is
-   categorical — no numeric threshold on the wire.
-6. ROC study: calibration/held-out DISJOINT; FAR/FRR with 95% Clopper–Pearson CIs; ≥3-strata FRR with
-   honest caveat. No point estimate without an interval. CSVs are source of truth.
-7. Phase 3 deps (verify): proctor_core, crypto, thiserror, sha2, serde, serde_json, statrs. No unsafe/async/SSIM-crate.
-8. All media stays in memfds; verify flow opens no plaintext disk file.
+## Hard rules (Phase 4)
+1. sched is #![forbid(unsafe_code)]. All unsafe stays only in crypto::sys. No async/tokio.
+2. Every state-mutating store op is ATOMIC and EPOCH-FENCED (Lua in Redis): a write whose epoch <
+   current lease epoch is REJECTED, no mutation — mirrors core::apply StaleEpoch. Heartbeat too.
+3. ONE reclaim authority (reclaim_expired: epoch++ + re-enqueue). NO stream PEL / XAUTOCLAIM second path.
+   A heartbeat timeout is a LIVENESS heuristic, NEVER a safety mechanism — fencing is safety.
+4. Least-loaded PUSH dispatch; workers never self-select. Priority + aging (no starvation).
+   Suspended/banned workers are INELIGIBLE.
+5. tier->p with hard floor P_MIN = 0.02 (no worker ever unsampled). Updates ASYMMETRIC: fast distrust on
+   fail, slow trust on pass (effective detection = P_hyper × (1 − FAR), FAR ≈ 21%). CommitmentMismatch heaviest.
+6. Content-addressed release anchored by Commitment (eager sampled / lazy unsampled). Release keyed by
+   content address, never task id. Closes verified-then-swapped TOCTOU.
+7. Backpressure caps from Little's law (L = λ × W, W = measured transcode time). Shed at saturation.
+8. Store logic is sans-Redis: memory + redis impls held to ONE contract.rs suite (incl. slow-zombie test).
+9. Phase 4 deps (sched): proctor_core, redis, rand, thiserror. Nothing else.
 
 ## Crypto invariants still in force (Phase 2, do not regress)
 - Keys 256-bit, mlock'd, ZeroizeOnDrop, redacted Debug, no Serialize/disk/log surface.
@@ -54,15 +57,19 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 - Phase 1 (core): sha2, serde, postcard, thiserror; proptest dev-only.
 - Phase 2 (crypto): aes-gcm, zeroize, libc, getrandom (+ proctor_core, thiserror).
 - Phase 3 (verify): proctor_core, crypto, thiserror, sha2, serde, serde_json, statrs.
-  Added per-session as the modules that use them land (Session 1: crypto only).
+- Phase 4 (sched): proctor_core, redis, rand, thiserror. Nothing else.
+  Added per-session as the modules that use them land (Session 1: proctor_core + thiserror only;
+  redis lands Session 2, rand lands Session 4).
 - Later phases add their deps when reached, recorded here at that time.
 
 ## Commit discipline (Claude Code commits)
-- Conventional Commits <type>(verify|crypto): ..., atomic, GREEN tree, body cites spec/amendment.
-- crypto §3.1 refactor is its own commit, landed first.
+- Conventional Commits <type>(sched): ..., atomic, GREEN tree (contract.rs green at each commit),
+  body cites spec/amendment.
+- The in-memory impl lands first, then Redis proven against the same contract.rs.
 - Never commit red / secrets / media / large binaries. No --no-verify, no force-push, no core/ edits.
-- Freeze = final commit + annotated tag v0.1.0-core-frozen.
+- Freeze tag v0.1.0-core-frozen stands; git diff v0.1.0-core-frozen -- core/ MUST stay empty.
 
 ## Scope discipline
 Work ONLY on the given session. End with build+clippy+test, commit(s), change list, STOP.
-No adaptive POLICY (Phase 4), no sched, no transport. Never touch a future phase or core/.
+sched only. NO real worker/verifier binaries (Phase 5), NO chaos sim / single-host run (Phase 6),
+NO transcode/crypto/SSIM. Never touch a future phase or core/.

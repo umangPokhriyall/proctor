@@ -1,0 +1,15 @@
+segment,bytes,op,iters,seconds,gbps,backend
+gradient_000,154746,encrypt,1734,0.172168,1.5585,aesni-runtime-detected
+gradient_000,154746,decrypt,1734,0.268177,1.0006,aesni-runtime-detected
+gradient_001,54967,encrypt,4883,0.172377,1.5571,aesni-runtime-detected
+gradient_001,54967,decrypt,4883,0.282300,0.9508,aesni-runtime-detected
+detail_000,439227,encrypt,611,0.172316,1.5574,aesni-runtime-detected
+detail_000,439227,decrypt,611,0.263909,1.0169,aesni-runtime-detected
+detail_001,185276,encrypt,1448,0.171518,1.5641,aesni-runtime-detected
+detail_001,185276,decrypt,1448,0.269009,0.9973,aesni-runtime-detected
+motion_000,1865801,encrypt,143,0.178348,1.4960,aesni-runtime-detected
+motion_000,1865801,decrypt,143,0.272497,0.9791,aesni-runtime-detected
+motion_001,628076,encrypt,427,0.171707,1.5619,aesni-runtime-detected
+motion_001,628076,decrypt,427,0.266475,1.0064,aesni-runtime-detected
+ALL,1608378765,encrypt,-,1.038434,1.5489,aesni-runtime-detected
+ALL,1608378765,decrypt,-,1.622368,0.9914,aesni-runtime-detected

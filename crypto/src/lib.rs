@@ -30,7 +30,7 @@ pub mod transcode;
 pub use aead::{decrypt, encrypt, EncryptedSegment, Role, SecretBuf, SegmentAad};
 pub use key::SecretKey;
 pub use memfd::{decrypt_into_memfd, MemFd};
-pub use transcode::transcode_no_disk;
+pub use transcode::{ffmpeg_no_disk, transcode_no_disk};
 
 /// Errors surfaced by the in-memory crypto path. Authentication failure is the
 /// security-critical one: it returns `Err` and never yields plaintext.

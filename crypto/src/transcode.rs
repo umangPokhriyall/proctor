@@ -1,9 +1,16 @@
-//! `transcode` — ffmpeg with no disk surface (phase2-spec.md §6).
+//! `transcode` — ffmpeg with no disk surface (phase2-spec.md §6, phase3-spec.md §3.1).
 //!
-//! [`transcode_no_disk`] reads its plaintext input from a [`MemFd`] and writes its
-//! plaintext output to a fresh [`MemFd`], passing each to ffmpeg as a
-//! `/proc/self/fd/N` URL. There is **no** `-i input.mp4` disk path, ever: the
-//! decrypted source and the transcoded output exist only in anonymous RAM.
+//! [`ffmpeg_no_disk`] is the single no-disk ffmpeg primitive: it runs ffmpeg with a
+//! caller-supplied argument vector and a set of [`MemFd`]s made inheritable so the
+//! child can open each as `/proc/self/fd/N`. It owns the spawn, stderr drain,
+//! wall-clock timeout, and exit→error mapping — keeping all `unsafe` in [`crate::sys`]
+//! so consumers like `verify::frame` can stay `#![forbid(unsafe_code)]`.
+//!
+//! [`transcode_no_disk`] is a thin caller of that primitive: it reads its plaintext
+//! input from a [`MemFd`] and writes its plaintext output to a fresh [`MemFd`],
+//! passing each to ffmpeg as a `/proc/self/fd/N` URL. There is **no** `-i input.mp4`
+//! disk path, ever: the decrypted source and the transcoded output exist only in
+//! anonymous RAM.
 //!
 //! The frozen [`core::TargetProfile`](proctor_core::TargetProfile) is mapped to
 //! ffmpeg arguments by the pure [`profile_args`] function. ffmpeg failure (non-zero
@@ -18,7 +25,9 @@
 //! stream is transcoded and audio is dropped (`-an`); audio passthrough is a Phase 5
 //! concern, out of this session's scope.
 
+use std::ffi::OsString;
 use std::io::Read;
+use std::os::fd::RawFd;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,39 +51,31 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Bytes of ffmpeg stderr retained for an error report (the tail, where the cause is).
 const STDERR_TAIL_BYTES: usize = 4096;
 
-/// Transcode the plaintext in `input` to `profile`, returning the plaintext output
-/// in a fresh [`MemFd`]. ffmpeg reads `input.proc_path()` and writes the output's
-/// `proc_path()`; no plaintext path ever touches disk.
-pub fn transcode_no_disk(input: &MemFd, profile: &TargetProfile) -> Result<MemFd, CryptoError> {
-    let output = MemFd::create("proctor-output")?;
-
+/// Run `ffmpeg` with `args`, making every fd in `fds` inheritable so the child can
+/// open each memfd as `/proc/self/fd/N` (phase3-spec.md §3.1). This is the **single**
+/// no-disk ffmpeg primitive: it owns the spawn, the stderr drain, the wall-clock
+/// timeout, and the exit→[`CryptoError`] mapping, but it does **not** own the
+/// memfds — the caller creates them and is responsible for `zeroize_and_close` on
+/// every exit path. `verify::frame` reuses this so all `unsafe` stays in [`crate::sys`]
+/// and `verify` can keep `#![forbid(unsafe_code)]`.
+///
+/// `args` is the full ffmpeg argument vector (everything after the program name); the
+/// `proc_path()` of each fd in `fds` must already appear in it. Returns `Ok(())` on a
+/// zero exit, `Err(TranscodeFailed)` with a bounded stderr tail on non-zero exit,
+/// `Err(Timeout)` if the wall-clock budget is exceeded, or `Err(Io)` on spawn/wait
+/// failure.
+pub fn ffmpeg_no_disk(args: &[OsString], fds: &[&MemFd]) -> Result<(), CryptoError> {
     let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-nostdin")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-y")
-        .arg("-i")
-        .arg(input.proc_path())
-        .args(profile_args(profile))
-        .arg("-an")
-        .arg("-f")
-        .arg(container_format(profile.container))
-        .arg(output.proc_path())
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
     // The memfds are CLOEXEC; clear that in the child so ffmpeg can open the fds.
-    sys::set_fds_inheritable(&mut cmd, vec![input.raw_fd(), output.raw_fd()]);
+    let raw_fds: Vec<RawFd> = fds.iter().map(|mf| mf.raw_fd()).collect();
+    sys::set_fds_inheritable(&mut cmd, raw_fds);
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            output.zeroize_and_close();
-            return Err(e.into());
-        }
-    };
+    let mut child = cmd.spawn()?;
 
     // Drain stderr on a thread so a chatty ffmpeg cannot deadlock on a full pipe.
     let stderr_reader = child.stderr.take().map(|mut s| {
@@ -103,27 +104,62 @@ pub fn transcode_no_disk(input: &MemFd, profile: &TargetProfile) -> Result<MemFd
         || stderr_reader.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
 
     match status {
-        Ok(Some(status)) if status.success() => Ok(output),
-        Ok(Some(_)) => {
-            let tail = stderr_tail(&collect_stderr());
-            output.zeroize_and_close();
-            Err(CryptoError::TranscodeFailed { stderr_tail: tail })
-        }
+        Ok(Some(status)) if status.success() => Ok(()),
+        Ok(Some(_)) => Err(CryptoError::TranscodeFailed {
+            stderr_tail: stderr_tail(&collect_stderr()),
+        }),
         Ok(None) => {
             let _ = child.kill();
             let _ = child.wait();
             let _ = collect_stderr();
-            output.zeroize_and_close();
             Err(CryptoError::Timeout)
         }
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
             let _ = collect_stderr();
-            output.zeroize_and_close();
             Err(e.into())
         }
     }
+}
+
+/// Transcode the plaintext in `input` to `profile`, returning the plaintext output in
+/// a fresh [`MemFd`]. A thin caller of [`ffmpeg_no_disk`]: it owns the output memfd's
+/// lifecycle (`zeroize_and_close` on every error) and lets the primitive run ffmpeg
+/// over `/proc/self/fd/N`; no plaintext path ever touches disk.
+pub fn transcode_no_disk(input: &MemFd, profile: &TargetProfile) -> Result<MemFd, CryptoError> {
+    let output = MemFd::create("proctor-output")?;
+    let args = transcode_args(input, &output, profile);
+    match ffmpeg_no_disk(&args, &[input, &output]) {
+        Ok(()) => Ok(output),
+        Err(e) => {
+            output.zeroize_and_close();
+            Err(e)
+        }
+    }
+}
+
+/// Build the full ffmpeg argument vector for a no-disk transcode of `input`→`output`
+/// under `profile`. Both endpoints are `/proc/self/fd/N` URLs (anonymous RAM), never
+/// disk paths; `-f` is explicit because the proc-path URL carries no extension to
+/// infer the muxer from, and `-an` drops audio (the corpus is silent; passthrough is
+/// a Phase 5 concern).
+fn transcode_args(input: &MemFd, output: &MemFd, profile: &TargetProfile) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        input.proc_path().into(),
+    ];
+    args.extend(profile_args(profile).into_iter().map(OsString::from));
+    args.push("-an".into());
+    args.push("-f".into());
+    args.push(container_format(profile.container).into());
+    args.push(output.proc_path().into());
+    args
 }
 
 /// Map the frozen [`TargetProfile`] to the codec/scale/bitrate ffmpeg args. Pure.

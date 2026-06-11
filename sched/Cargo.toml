@@ -16,3 +16,7 @@ thiserror.workspace = true
 # async runtimes out — locked decision #1 forbids an async runtime in sched; the
 # "script" feature is the (sync) EVALSHA/Script support we rely on.
 redis = { version = "0.27", default-features = false, features = ["script"] }
+# Session 4 (phase4-spec.md §5.3): Bernoulli(p_tier) verify-sampling with an
+# injectable RNG — OsRng/entropy in prod, seeded StdRng in tests. 0.8 matches the
+# rand already in the tree (proptest); no async.
+rand = "0.8"

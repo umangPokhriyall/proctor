@@ -60,7 +60,7 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 - Phase 4 (sched): proctor_core, redis, rand, thiserror. Nothing else.
   Added per-session as the modules that use them land (Session 1: proctor_core + thiserror;
   Session 2: + redis (default-features=false, features=["script"], no async runtime);
-  rand lands Session 4).
+  Session 4: + rand 0.8 (Bernoulli verify-sampling, injectable RNG)). Full set now present.
 - Later phases add their deps when reached, recorded here at that time.
 
 ## Commit discipline (Claude Code commits)

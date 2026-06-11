@@ -75,30 +75,20 @@ impl Tier {
     }
 }
 
-/// The penalty a reputation delta subtracts from standing. PLACEHOLDER magnitudes for
-/// Phase 4 Session 1 — `reputation.rs` (Session 4) owns the real asymmetric policy (fast
-/// distrust on fail, slow trust on pass) and the `CommitmentMismatch`-is-heaviest
-/// weighting. Shared by **both** stores so the differential oracle compares like with
-/// like. `core::ReputationDelta` carries only penalties, so this is always positive.
+/// The penalty a coarse [`ReputationDelta`] subtracts from standing — delegated to the
+/// authoritative [`crate::reputation`] policy (Session 4), so the store's `update_standing`
+/// and the engine's rich path share one set of magnitudes. Exposed for the Redis store,
+/// whose Lua `HINCRBY` needs the magnitude as a plain integer; both stores use it, so the
+/// differential oracle compares like with like.
 pub(crate) fn standing_penalty(delta: ReputationDelta) -> i32 {
-    match delta {
-        ReputationDelta::VerificationFailure => 2,
-        ReputationDelta::Timeout => 1,
-    }
+    crate::reputation::penalty(delta)
 }
 
-/// Map an accumulated reputation standing to a tier. PLACEHOLDER bands for Session 1 —
-/// the real thresholds (and the slow-trust recovery path) are finalized in
-/// `reputation.rs` (Session 4). Monotonic: lower standing ⇒ a stricter tier. Shared by
-/// both stores so a given standing maps to the same tier regardless of backend.
+/// Map an accumulated reputation standing to a tier — delegated to the authoritative
+/// [`crate::reputation::tier_of`] (Session 4), so a given standing maps to the same tier
+/// regardless of backend or call path.
 pub(crate) fn tier_from_standing(standing: i32) -> Tier {
-    match standing {
-        s if s >= 0 => Tier::Pristine,
-        -3..=-1 => Tier::Watch,
-        -7..=-4 => Tier::Suspect,
-        -14..=-8 => Tier::Suspended,
-        _ => Tier::Banned,
-    }
+    crate::reputation::tier_of(standing)
 }
 
 /// A snapshot of a worker's load, read by the placement layer (Session 3) to choose the

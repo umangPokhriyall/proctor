@@ -16,14 +16,18 @@
 //! in-memory [`store::MemoryStore`] reference, and the shared `contract` suite including
 //! the slow-zombie store-level test (§3.3). **Session 2** added the Lua-atomic
 //! [`store::RedisStore`], proven equivalent by the same suite. **Session 3** (this commit)
-//! adds the placement and backpressure *decision* modules — [`place`] (least-loaded push
+//! added the placement and backpressure *decision* modules — [`place`] (least-loaded push
 //! selection + the aging anti-starvation policy, §4) and [`backpressure`] (Little's-law
-//! sizing + shed-at-saturation, §6) — written over the `Store` trait, free of Redis
-//! specifics. Later sessions add reputation/sampling, the `core`-driven engine, the
-//! dispatch/reclaim loops, and the simulated harness.
+//! sizing + shed-at-saturation, §6). **Session 4** (this commit) adds the adaptive policy:
+//! [`reputation`] (tiers, the asymmetric standing updates, and the tier→`p` mapping with
+//! the hard `P_MIN` floor, §5) and [`sample`] (`Bernoulli(p_tier)` over an injectable RNG,
+//! §5.3). Later sessions add the `core`-driven engine, the dispatch/reclaim loops, and the
+//! simulated harness.
 
 #![forbid(unsafe_code)]
 
 pub mod backpressure;
 pub mod place;
+pub mod reputation;
+pub mod sample;
 pub mod store;

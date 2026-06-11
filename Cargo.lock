@@ -977,6 +977,7 @@ name = "sched"
 version = "0.0.0"
 dependencies = [
  "core",
+ "rand 0.8.6",
  "redis",
  "thiserror",
 ]

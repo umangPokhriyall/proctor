@@ -10,17 +10,24 @@
 //! [`crypto::ffmpeg_no_disk`] (the no-disk memfd primitive), so all `unsafe` stays
 //! confined to `crypto::sys` and no media ever lands on a disk-backed file.
 //!
-//! **Session 1 (this commit)** lands the two leaf primitives: [`ssim`] (single-scale
-//! SSIM over luma) and [`frame`] (Y-plane extraction at a timestamp over the no-disk
-//! ffmpeg path). `binding`, `compare`, `detection`, and `roc` arrive in later sessions.
+//! **Session 1** landed the two leaf primitives: [`ssim`] (single-scale SSIM over luma)
+//! and [`frame`] (Y-plane extraction over the no-disk ffmpeg path). **Session 2** adds
+//! [`binding`] (the enforced single-leaf commit chain → content-addressed `OutputRef`)
+//! and [`compare`] (the per-segment verify flow). `detection` and `roc` follow.
 
 #![forbid(unsafe_code)]
 
 use thiserror::Error;
 
+pub mod binding;
+pub mod compare;
 pub mod frame;
 pub mod ssim;
 
+pub use binding::check_binding;
+pub use compare::{
+    verify_segment, RocThreshold, SamplePlan, SegmentInputs, Verdict, ROC_THRESHOLD_PATH,
+};
 pub use frame::{extract_y_frame, Frame};
 pub use ssim::ssim;
 
@@ -45,4 +52,18 @@ pub enum VerifyError {
     /// non-zero exit, or memfd I/O).
     #[error("no-disk ffmpeg/crypto failure: {0}")]
     Crypto(#[from] crypto::CryptoError),
+    /// The single-leaf commit binding failed: `Commitment::commit(&[SHA-256(blob)])`
+    /// did not equal the worker's submitted commitment (phase3-spec.md §3.4). The
+    /// output is tamper-evident; no challenge frame is chosen.
+    #[error("commit binding failed: blob does not match the submitted commitment")]
+    BindingMismatch,
+    /// The committed ROC threshold file could not be read or parsed. The verifier
+    /// refuses to run on an unknown threshold rather than invent one.
+    #[error("could not load ROC threshold from {path}: {reason}")]
+    ThresholdLoad {
+        /// The path that failed to load.
+        path: String,
+        /// The underlying I/O or parse error.
+        reason: String,
+    },
 }

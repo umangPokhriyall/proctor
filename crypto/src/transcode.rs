@@ -33,8 +33,11 @@ use crate::{sys, CryptoError};
 /// cannot hang a worker indefinitely.
 const TRANSCODE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How often the wait loop polls the child for exit.
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// How often the wait loop polls the child for exit. Kept at 1 ms so the loop adds
+/// at most ~1 ms of latency past ffmpeg's actual exit (the Phase 2 microbench's
+/// memfd-vs-disk arm surfaced a coarser interval oversleeping past completion);
+/// 1 ms over a ~100 ms transcode is ~100 wakeups — negligible CPU.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Bytes of ffmpeg stderr retained for an error report (the tail, where the cause is).
 const STDERR_TAIL_BYTES: usize = 4096;

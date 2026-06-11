@@ -58,8 +58,9 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 - Phase 2 (crypto): aes-gcm, zeroize, libc, getrandom (+ proctor_core, thiserror).
 - Phase 3 (verify): proctor_core, crypto, thiserror, sha2, serde, serde_json, statrs.
 - Phase 4 (sched): proctor_core, redis, rand, thiserror. Nothing else.
-  Added per-session as the modules that use them land (Session 1: proctor_core + thiserror only;
-  redis lands Session 2, rand lands Session 4).
+  Added per-session as the modules that use them land (Session 1: proctor_core + thiserror;
+  Session 2: + redis (default-features=false, features=["script"], no async runtime);
+  rand lands Session 4).
 - Later phases add their deps when reached, recorded here at that time.
 
 ## Commit discipline (Claude Code commits)

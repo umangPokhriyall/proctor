@@ -334,15 +334,25 @@ pub(crate) fn standing_penalties_escalate_tier<S: Store>(s: &S) {
 }
 
 /// Generate the full shared contract suite as `#[test]`s, each constructing a fresh
-/// store via `$new`. Invoked by `memory` (this session) and `redis` (Session 2) so both
-/// backends run byte-identical test logic — the differential oracle.
+/// store via `$make`, an expression yielding `Option<impl Store>`. Invoked by `memory`
+/// (always `Some`) and `redis` (`Some` iff a Redis is reachable, else `None` ⇒ the case
+/// skips **loudly**). Both backends thus run byte-identical test logic — the
+/// differential oracle (§9). The gate never fabricates a pass: a skip is visible.
 macro_rules! store_contract_suite {
-    ($new:expr) => {
+    ($make:expr) => {
         macro_rules! case {
             ($name:ident) => {
                 #[test]
                 fn $name() {
-                    $crate::store::contract::$name(&$new);
+                    match $make {
+                        Some(store) => $crate::store::contract::$name(&store),
+                        None => eprintln!(concat!(
+                            "SKIP store-contract `",
+                            stringify!($name),
+                            "`: no reachable backend (set PROCTOR_TEST_REDIS_URL / start Redis \
+                             to run the Redis tier)"
+                        )),
+                    }
                 }
             };
         }

@@ -19,7 +19,7 @@ use proctor_core::{
     TaskState, WorkerId,
 };
 
-use super::{Priority, Store, StoreError, Tier, WorkerLoad};
+use super::{standing_penalty, tier_from_standing, Priority, Store, StoreError, Tier, WorkerLoad};
 
 /// A worker's registry entry. Standing accumulates reputation penalties; the tier is
 /// derived from it (the policy mapping is finalized in Session 4).
@@ -313,29 +313,12 @@ impl Store for MemoryStore {
             .workers
             .get_mut(&worker)
             .ok_or(StoreError::UnknownWorker(worker))?;
-        // Session-1 placeholder magnitudes. The asymmetric policy (fast distrust on fail,
-        // slow trust on pass), the CommitmentMismatch-is-heaviest weighting, and the
-        // tier→p P_MIN floor are owned by reputation.rs (Session 4); the store only
-        // persists standing and reports the tier it lands in.
-        let penalty = match delta {
-            ReputationDelta::VerificationFailure => 2,
-            ReputationDelta::Timeout => 1,
-        };
-        entry.standing = entry.standing.saturating_sub(penalty);
+        // The placeholder magnitudes + tier bands are shared with the Redis store
+        // (super::standing_penalty / super::tier_from_standing) so the differential
+        // oracle compares like with like; the asymmetric policy + P_MIN floor land in
+        // reputation.rs (Session 4).
+        entry.standing = entry.standing.saturating_sub(standing_penalty(delta));
         Ok(tier_from_standing(entry.standing))
-    }
-}
-
-/// Map an accumulated standing to a tier. PLACEHOLDER bands for Session 1 — the real
-/// thresholds (and the slow-trust recovery path) are finalized in reputation.rs
-/// (Session 4). Monotonic: lower standing ⇒ a stricter tier.
-fn tier_from_standing(standing: i32) -> Tier {
-    match standing {
-        s if s >= 0 => Tier::Pristine,
-        -3..=-1 => Tier::Watch,
-        -7..=-4 => Tier::Suspect,
-        -14..=-8 => Tier::Suspended,
-        _ => Tier::Banned,
     }
 }
 
@@ -345,7 +328,8 @@ mod tests {
     use crate::store::contract::store_contract_suite;
 
     // Run the full shared differential contract suite (incl. the slow-zombie and
-    // heartbeat-after-reclaim tests) against the in-memory reference. Session 2 invokes
-    // the identical macro against the Redis store.
-    store_contract_suite!(MemoryStore::new());
+    // heartbeat-after-reclaim tests) against the in-memory reference. The Redis store
+    // invokes the identical macro; the in-memory backend is always available, so it
+    // hands the macro `Some(store)` unconditionally (no gating).
+    store_contract_suite!(Some(MemoryStore::new()));
 }

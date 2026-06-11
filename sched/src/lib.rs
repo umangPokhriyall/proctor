@@ -11,13 +11,19 @@
 //! `sched` is `#![forbid(unsafe_code)]`: all `unsafe` stays confined to `crypto::sys`,
 //! and there is no async runtime anywhere in the measured path (locked decision #1).
 //!
-//! **Session 1** (this commit) lands the load-bearing proof: the [`store`] module — the
+//! **Session 1** landed the load-bearing proof: the [`store`] module — the
 //! [`store::Store`] trait of atomic, epoch-fenced operations (§3.1), the deterministic
 //! in-memory [`store::MemoryStore`] reference, and the shared `contract` suite including
-//! the slow-zombie store-level test (§3.3). Later sessions add the Redis store, placement,
-//! reputation/sampling, the `core`-driven engine, the dispatch/reclaim loops, and the
-//! simulated harness — all written over the same `Store` trait.
+//! the slow-zombie store-level test (§3.3). **Session 2** added the Lua-atomic
+//! [`store::RedisStore`], proven equivalent by the same suite. **Session 3** (this commit)
+//! adds the placement and backpressure *decision* modules — [`place`] (least-loaded push
+//! selection + the aging anti-starvation policy, §4) and [`backpressure`] (Little's-law
+//! sizing + shed-at-saturation, §6) — written over the `Store` trait, free of Redis
+//! specifics. Later sessions add reputation/sampling, the `core`-driven engine, the
+//! dispatch/reclaim loops, and the simulated harness.
 
 #![forbid(unsafe_code)]
 
+pub mod backpressure;
+pub mod place;
 pub mod store;

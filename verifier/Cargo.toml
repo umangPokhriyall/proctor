@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "verifier"
+path = "src/main.rs"
+
 [dependencies]
+# Phase 5 allowlist (phase5-spec.md §2): proctor_core, crypto, verify, redis, sha2, thiserror.
 proctor_core = { package = "core", path = "../core" }
+crypto = { path = "../crypto" }
 verify = { path = "../verify" }
+sha2.workspace = true
+thiserror.workspace = true
+# Sync Redis only — locked decision #1 forbids an async runtime; same pin/features as
+# sched/worker (no default features keeps tokio/async out).
+redis = { version = "0.27", default-features = false, features = ["script"] }

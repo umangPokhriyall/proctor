@@ -16,7 +16,10 @@
 //! and [`compare`] (the per-segment verify flow). **Session 3** added [`detection`] (the exact
 //! hypergeometric detection-probability family with the `P_MIN` floor). **Session 4** adds [`roc`]
 //! (calibration/held-out split, FAR/FRR with Clopper–Pearson intervals, threshold selection) and
-//! the `verify_eval` study.
+//! the `verify_eval` study. **Phase 5** adds the batched-decode remedy
+//! ([`frame::extract_y_frames`] — one ffmpeg pass per memfd, no per-frame spawn, driving
+//! verification cost toward the fundamental transcode) and [`integrity`] (Stitch
+//! content-address verification, no SSIM); the `verifier` binary consumes both.
 
 #![forbid(unsafe_code)]
 
@@ -26,6 +29,7 @@ pub mod binding;
 pub mod compare;
 pub mod detection;
 pub mod frame;
+pub mod integrity;
 pub mod roc;
 pub mod ssim;
 
@@ -34,7 +38,8 @@ pub use compare::{
     verify_segment, RocThreshold, SamplePlan, SegmentInputs, Verdict, ROC_THRESHOLD_PATH,
 };
 pub use detection::{p_detect_binomial, p_detect_hypergeometric, P_MIN};
-pub use frame::{extract_y_frame, Frame};
+pub use frame::{extract_y_frame, extract_y_frames, Frame};
+pub use integrity::{verify_stitch_integrity, StitchInput};
 pub use roc::{
     clopper_pearson, rates, select_threshold_youden, Class, DataSet, Sample, Stratum, Variant,
 };

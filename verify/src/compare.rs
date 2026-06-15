@@ -33,7 +33,7 @@ use crypto::{
 };
 
 use crate::binding::check_binding;
-use crate::frame::extract_y_frame;
+use crate::frame::extract_y_frames;
 use crate::ssim::ssim;
 use crate::VerifyError;
 
@@ -78,9 +78,11 @@ impl RocThreshold {
 pub struct SamplePlan {
     /// Number of challenge frames (clamped to ≥ 1 — every segment is sampled).
     pub frames: u32,
-    /// Seed for the timestamp RNG; fixed in the eval, OS-random in production.
+    /// Seed for the position RNG; fixed in the eval, OS-random in production.
     pub seed: u64,
-    /// Segment duration in seconds; timestamps are drawn from `[0, duration_secs)`.
+    /// Segment duration in seconds (informational/provenance). The batched comparison
+    /// samples normalized positions in `[0, 1)` and indexes frames, so the score does
+    /// not depend on this value; it records the segment length for the study artifacts.
     pub duration_secs: f64,
     /// Common extraction width for both planes.
     pub width: u32,
@@ -208,30 +210,45 @@ fn parse_and_decrypt(inputs: &SegmentInputs<'_>) -> Result<MemFd, VerifyError> {
     )?)
 }
 
-/// Extract the Y plane from both memfds at each sampled timestamp and return the minimum
-/// MSSIM. The minimum (not the mean) is the conservative choice: a single substituted
-/// frame drags the score down even when the rest of the segment is faithful.
+/// Score the segment by the minimum MSSIM across sampled frames, using the **batched**
+/// decode ([`extract_y_frames`]) — one ffmpeg pass per memfd, no per-frame spawn (the
+/// Phase 3 cost remedy, phase5-spec.md §5.1). The minimum (not the mean) is the
+/// conservative choice: a single substituted frame drags the score down even when the
+/// rest of the segment is faithful. Both memfds are extracted at the same fractions and
+/// geometry, so frame `i` of the worker aligns with frame `i` of the reference.
 fn sampled_min_ssim(
     worker: &MemFd,
     reference: &MemFd,
     plan: &SamplePlan,
 ) -> Result<f64, VerifyError> {
+    let fractions = sample_fractions(plan.seed, plan.frames);
+    let worker_frames = extract_y_frames(worker, &fractions, plan.width, plan.height)?;
+    let reference_frames = extract_y_frames(reference, &fractions, plan.width, plan.height)?;
+
     let mut min = f64::INFINITY;
-    for ts in sample_timestamps(plan.seed, plan.frames, plan.duration_secs) {
-        let worker_frame = extract_y_frame(worker, ts, plan.width, plan.height)?;
-        let reference_frame = extract_y_frame(reference, ts, plan.width, plan.height)?;
-        let score = ssim(&reference_frame, &worker_frame)?;
+    for (worker_frame, reference_frame) in worker_frames.iter().zip(reference_frames.iter()) {
+        let score = ssim(reference_frame, worker_frame)?;
         if score < min {
             min = score;
         }
     }
-    Ok(min)
+    if min.is_finite() {
+        Ok(min)
+    } else {
+        // No frames decoded — cannot reach a fidelity verdict.
+        Err(VerifyError::FrameSize {
+            expected: plan.width as usize * plan.height as usize,
+            got: 0,
+        })
+    }
 }
 
-/// Deterministic challenge timestamps in `[0, duration)` from `seed`, via SplitMix64.
-/// Reproducible for the eval; production passes an OS-random seed. `frames` is clamped to
-/// ≥ 1 so every segment is sampled at least once (mirrors the detection `P_MIN` floor).
-fn sample_timestamps(seed: u64, frames: u32, duration: f64) -> Vec<f64> {
+/// Deterministic challenge positions as fractions of the segment in `[0, 1)`, from
+/// `seed`, via SplitMix64. Reproducible for the eval; production passes an OS-random
+/// seed. `frames` is clamped to ≥ 1 so every segment is sampled at least once (mirrors
+/// the detection `P_MIN` floor). The batched extractor maps each fraction to a frame
+/// index, so positions — not absolute timestamps — are what the comparison needs.
+fn sample_fractions(seed: u64, frames: u32) -> Vec<f64> {
     let mut state = seed;
     (0..frames.max(1))
         .map(|_| {
@@ -241,9 +258,8 @@ fn sample_timestamps(seed: u64, frames: u32, duration: f64) -> Vec<f64> {
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^= z >> 31;
-            // Top 53 bits → a uniform fraction in [0, 1), then scaled into the segment.
-            let frac = (z >> 11) as f64 / (1u64 << 53) as f64;
-            frac * duration
+            // Top 53 bits → a uniform fraction in [0, 1).
+            (z >> 11) as f64 / (1u64 << 53) as f64
         })
         .collect()
 }

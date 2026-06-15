@@ -1443,6 +1443,10 @@ version = "0.0.0"
 dependencies = [
  "core",
  "crypto",
+ "redis",
+ "sha2",
+ "thiserror",
+ "verify",
 ]
 
 [[package]]

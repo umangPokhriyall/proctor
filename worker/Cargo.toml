@@ -5,6 +5,24 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "worker"
+path = "src/main.rs"
+
 [dependencies]
+# Phase 5 allowlist (phase5-spec.md §2): proctor_core, crypto, redis, sha2, thiserror.
 proctor_core = { package = "core", path = "../core" }
 crypto = { path = "../crypto" }
+sha2.workspace = true
+thiserror.workspace = true
+# Sync Redis only — locked decision #1 forbids an async runtime in the worker hot
+# path. Same pin/features as `sched` (no default features keeps tokio/async out;
+# "script" is the Lua registration script support).
+redis = { version = "0.27", default-features = false, features = ["script"] }
+
+[dev-dependencies]
+# Test-only oracle (phase5-spec.md §8, §10.2): the worker's commitment/output must be
+# exactly what the verifier's `check_binding` accepts. We call the REAL function rather
+# than re-implement its 2-line check, so the cross-check cannot silently drift. `verify`
+# is NOT a runtime dependency of the worker binary (allowlist §2) — dev-only.
+verify = { path = "../verify" }

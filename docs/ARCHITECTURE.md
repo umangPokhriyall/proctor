@@ -2,9 +2,12 @@
 
 > **Status:** grows as phases land. This file records design decisions and the reasons
 > behind them, declaratively, with every claim tied to code or a committed measurement.
-> **Phase 3** added the verification design; **Phase 4** adds the scheduler design below
-> (push dispatch, the fencing-token store, the adaptive policy, Little's-law sizing). The
-> scheduler/bench *measurements* (dispatch-latency p99, saturation) follow in Phase 6.
+> **Phase 3** added the verification design; **Phase 4** added the scheduler design below
+> (push dispatch, the fencing-token store, the adaptive policy, Little's-law sizing);
+> **Phase 5** adds the live **data plane** below — the `worker` and `verifier` binaries,
+> the `crypto::blob`/`crypto::keysource` seams, batched-decode verification, the live
+> Redis transport, and the single-host smoke run. The scheduler/bench *measurements*
+> (dispatch-latency p99, saturation, the full cost distribution) follow in Phase 6.
 
 ## Verification (Phase 3)
 
@@ -97,11 +100,16 @@ Source of truth: `bench/results/verify/STUDY.md` and the CSVs it cites
 Measured per clip (`bench/results/verify/verification-cost.csv`, `STUDY.md`): the
 **fundamental** cost of verifying a segment is **one reference re-encode** — mean ≈ 1.2×
 the worker's transcode, i.e. the verifier re-does essentially one transcode, as expected.
-The frame-extraction term measured by the current example is inflated by **per-frame
-ffmpeg process spawns** (`extract_y_frame` launches one ffmpeg per frame); a production
-verifier decodes each sampled segment **once** in-process and reads all challenge frames
-from that pass, collapsing the term toward the SSIM compute. We report the measured cost
-and name the optimization rather than assume it.
+The frame-extraction term measured by the Phase 3 example was inflated by **per-frame
+ffmpeg process spawns** (`extract_y_frame` launches one ffmpeg per frame; ≈ 94–100 ms per
+frame pair). We reported that cost and *named* the optimization rather than assume it.
+
+**Phase 5 delivered it** (`verify::frame::extract_y_frames`, § Data plane → Verifier
+below): one ffmpeg pass per memfd decodes all sampled frames, with no per-frame spawn. The
+live smoke spot-check confirms the remedy on the same machine — ≈ 108 ms batched vs
+≈ 352 ms per-frame-spawn for 8 frames at the 160×120 comparison geometry
+(`bench/tests/live_smoke.rs::batched_decode_is_cheaper_than_per_frame_spawn`). The full
+cost distribution is a Phase 6 measurement.
 
 **Implication (feeds Phase 4/6 sizing):** with extraction batched, trusted-verifier
 capacity must be ≥ `p × worker_throughput`; at the `P_MIN = 0.02` floor that is ≈ 2% of
@@ -206,3 +214,120 @@ workers (≈ µs). **Prediction: in-process decision ≈ X µs; p99 dispatch ≈
 ~95% Redis RTTs** — which preempts the dismissal "your scheduler is just Redis latency." The
 queue is Little's-law-sized (above); both are confirmed against committed distributions in
 Phase 6.
+
+## Data plane (Phase 5)
+
+Phases 1–4 were proven in isolation or against a sim. Phase 5 makes them one running
+system on a single host: the **untrusted `worker`** and the **trusted `verifier`** binaries
+(both `#![forbid(unsafe_code)]`, no async — std threads + blocking Redis), the two additive
+`crypto` seams they need, and the live Redis transport. The bar is that the live path
+enforces the **same** properties the sim proved — the same epoch fencing, the same
+content-addressed release, the same `OutputRef`/`Commitment` arithmetic — which the
+single-host smoke run asserts directly.
+
+### Data-plane seams — `crypto::blob`, `crypto::keysource`
+
+- **Blob store (`crypto::blob`).** A content-addressed store of *ciphertext only*: a blob's
+  address is `lead128(SHA-256(ciphertext))` — the leading 128 bits of its SHA-256, big-endian
+  — which is exactly the `OutputRef` the worker commits, `verify::check_binding` re-derives,
+  and `sched` releases by. `LocalBlobStore` is the measured single-host path (one file per
+  blob under a tmpfs/filesystem root, named by its 32-hex address, so the layout *is* the
+  content addressing). An S3 adapter may sit behind the `BlobStore` trait but is never in the
+  measured path (kickoff §6). Only ciphertext is ever written; the no-plaintext-on-disk
+  invariant lives in `crypto::memfd`/`crypto::transcode` and is untouched. `crypto/src/blob.rs`.
+- **Key source (`crypto::keysource`).** Per-segment `SecretKey` delivery — the seam where a
+  key-trusted peer (worker or verifier) gets its shard key. `LocalKeySource` is the benchmark
+  stand-in (an in-process `(JobId, SegmentId) → key` map in `Zeroizing` RAM, never serialized
+  or persisted; benchmark keys on disk are permitted, plaintext never). **The production seam
+  is a TLS key authority and is deliberately not built** (kickoff §6): that authority, its
+  mutual-TLS handshake, and its access policy are out of scope for the single-host benchmark,
+  and the seam is documented rather than faked. `crypto/src/keysource.rs`. The worker holding
+  its shard key is the honest confidentiality boundary — see THREAT-MODEL §4.
+
+### The worker hot loop (`worker/`)
+
+The worker **receives** assignments and never self-selects. It registers a `WorkerId` in the
+scheduler registry (identity only), `BRPOP`s an encoded `Assignment` off its Redis inbox, and
+dispatches by kind. The load-bearing **Transcode** path (`worker/src/transcode_task.rs`):
+fetch the source ciphertext by its content address → `decrypt_into_memfd(Role::Source)` →
+`transcode_no_disk(profile)` → read the plaintext into a pinned zeroizing buffer and
+`aead::encrypt(Role::Output)` → `commitment = Commitment::commit(&[SHA-256(blob)])`,
+`output = OutputRef(lead128(SHA-256(blob)))` → upload to the blob store (the returned address
+equals `output`, by construction) → submit a `SubmissionMsg` **carrying the lease epoch**. A
+background heartbeat thread carries the same epoch during long work. Plaintext lives only in
+anonymous-RAM memfds and `mlock`'d `SecretBuf`s, `zeroize_and_close`d on the happy path and
+scrubbed by `MemFd::drop` on every error/panic path; only ciphertext is uploaded. The
+**Stitch** path (`stitch_task.rs`) re-verifies every input's content address before any work
+(rejecting a swapped input), concatenates the decrypted outputs no-disk, then encrypts /
+commits / submits identically; Transcode is the load-bearing proof, Stitch the secondary
+path (kickoff §6).
+
+A submitted output is fenced by the store's epoch CAS, so a slow zombie's late submit is
+rejected without the worker needing to know it lost the lease (THREAT-MODEL §4, Liveness).
+
+### cgroup-bounded concurrency (`worker/src/concurrency.rs`)
+
+Worker task concurrency is `min(configured_cap, cgroup_cpu_quota)` where the quota is read
+from cgroup-v2 `/sys/fs/cgroup/cpu.max` as `floor(quota / period)` (at least 1) — the number
+of whole CPUs the container is actually granted. There is **no** `num_cpus`/`loadavg`
+dependency anywhere: the legacy mechanical-sympathy bug (sizing a pool from host-wide load
+that ignores the cgroup budget) is avoided *structurally*, and the parse is unit-tested over
+fixture contents so it is verified without a real cgroup. One std thread per concurrent task,
+gated by a permit channel; the scheduler's per-worker in-flight cap (§ Little's-law
+backpressure) bounds how many the worker is pushed.
+
+### The verifier — batched-decode SSIM + stitch integrity (`verifier/`)
+
+The verifier is the trusted, CPU-bound tier, a **separate binary** from `sched` (locked
+decision #3). It `BRPOP`s a `VerifyRequest` and, for a **Transcode**, runs the Phase 3
+per-segment flow (`verify::verify_segment`): **bind before any challenge frame**
+(`check_binding`; a mismatch is `CommitmentMismatch` and nothing is sampled), decrypt source
++ output into memfds, reference-`transcode_no_disk` the source, and SSIM-compare against the
+threshold loaded from `roc-threshold.json` (never a literal) at the **160×120 calibration
+geometry** the threshold was selected at. The challenge seed is bound to the (already-fixed)
+commitment plus a wall-clock nonce, so a worker that committed first cannot predict the
+frames. A **Stitch** request is verified for *integrity, not fidelity*
+(`verify::integrity::verify_stitch_integrity`): every input's served bytes must bind to its
+committed `(OutputRef, Commitment)` — no SSIM, no re-encode (an AEAD random nonce makes
+output byte-equality infeasible, so manifest integrity is the enforced property). Any
+seam/decrypt/re-execute failure maps to `Inconclusive` — never a fabricated pass; all media
+stays in memfds.
+
+**Batched decode (the Phase 3 cost remedy).** `verify::frame::extract_y_frames` decodes a
+segment **once** per memfd in a single ffmpeg pass and indexes the sampled frames in-process
+— one spawn per memfd regardless of frame count, replacing the per-frame-spawn path
+(`compare.rs` no longer spawns per frame). This collapses verification cost toward the
+fundamental ≈ 1.20× transcode (§ Verification cost). The smoke spot-check records ≈ 108 ms
+batched vs ≈ 352 ms per-frame for 8 frames on the same machine; the full distribution is a
+Phase 6 measurement.
+
+### Live transport — push dispatch and the `sched:inbound` return channel
+
+Dispatch is push: `sched` `LPUSH`es an encoded `Assignment` to `{prefix}:inbox:{worker}` and
+a `VerifyRequest` to `{prefix}:inbox:verifier`. The **return channel** is a single
+`{prefix}:inbound` list: workers and the verifier `LPUSH` their holder-action messages, and
+`sched::loops` `BRPOP`s and routes them to the engine handlers (`route_inbound`/`inbound_tick`).
+Because postcard is not self-describing, each return frame is `[tag] ++ postcard(msg)` with a
+one-byte discriminant (heartbeat / submission / verdict); the tag is a wire convention
+restated at both ends, since the worker and verifier do not depend on `sched`. The live
+engine applies the verifier's **rich `VerifyDetail`** via `Store::record_verdict` on every
+verdict — crediting a pass slowly, banning a provable `CommitmentMismatch` in one step,
+leaving `Inconclusive` unchanged — closing Phase 4's coarse-reputation seam; both store
+backends agree on the magnitudes (the differential oracle). `sched/src/{loops,engine}.rs`,
+`sched/src/store/{mod,memory,redis}.rs`.
+
+### The live single-host smoke run (`bench/tests/live_smoke.rs`)
+
+A gated integration test (ffmpeg + Redis; loud-skips otherwise, never fabricates) that stands
+up the real `crypto`/`verify`/`sched` library code as worker + verifier threads over a local
+Redis + tmpfs `LocalBlobStore` + `LocalKeySource` + the committed corpus, and asserts the live
+path enforces the sim's properties: **(a)** an honest Transcode flows lease → decrypt →
+transcode → encrypt → commit → upload → submit → (sampled) verify → release, verified `Ok` and
+released **at its content address** (each stored blob is named by `lead128(SHA-256)`, and a
+released blob binds its exact bytes); **(b)** a **process-level zombie** — a worker reclaimed
+and re-dispatched to another at a strictly-greater epoch — has its stale-epoch submit rejected
+by the live Redis store (`StaleEpoch`), with **exactly one** output released; **(c)** the
+batched-decode cost spot-check above. The worker/verifier *binaries* are thin loops around the
+same library code; the smoke reproduces those loops as threads, and the engine still emits
+dispatch onto its in-process `Bus` with the harness relaying `Bus → Redis` inboxes (the
+Redis push-dispatch loop in `sched` itself is Phase 6).

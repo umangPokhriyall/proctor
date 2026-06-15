@@ -1,9 +1,11 @@
 # proctor — Untrusted-Worker Threat Model
 
-> **Status (Phase 0):** skeleton. Headings are committed now; §5 (residual risks) is
-> filled from measured behavior in Phase 7. The honest confidentiality boundary in §4 is
-> stated now, verbatim, so it cannot drift later. This file is the antithesis of, and
-> replacement for, the deleted `WORKER_SECURITY.md`.
+> **Status:** the headings were committed at Phase 0; the confidentiality boundary in §4 was
+> stated verbatim then so it cannot drift, and later phases fill in evidence as primitives
+> land (§5 residual risks still complete from measured behavior in Phase 7). **Phase 5**
+> reaffirms the worker-holds-key boundary in the **live** data plane and records
+> worker-authentication / anti-Sybil as a documented non-goal (§4). This file is the
+> antithesis of, and replacement for, the deleted `WORKER_SECURITY.md`.
 
 ## 1. Assets
 - Content confidentiality; content integrity/fidelity; task liveness.
@@ -20,6 +22,28 @@
   store, co-tenants, and a NON-root worker process; **NOT defended against a
   root-capable worker**, which can read ffmpeg process memory. Closing that gap is
   the microVM flagship's mandate, not this repo's. (State this plainly. Do not hedge.)
+  - **Reaffirmed in the live path (Phase 5).** The boundary is the same now that the
+    real `worker` binary runs it: the worker fetches its per-segment key over the
+    `crypto::keysource` seam (`LocalKeySource` for the benchmark; the production TLS key
+    authority is documented and **not built**, kickoff §6) and decrypts the segment into
+    anonymous RAM to transcode. **The untrusted worker holds the key and CAN see its
+    shard's plaintext — by design**: a worker that must decode the frame cannot be
+    cryptographically blinded to it, so root-on-worker defeats confidentiality regardless
+    of the live wiring. This is intentional and unchanged from Phase 2; it is precisely
+    the boundary the microVM flagship exists to close (§5). Nothing in Phase 5 pretends
+    otherwise — the live `worker`/`verifier` are both key-trusted but no-disk
+    (`crypto::keysource`, `worker/src/transcode_task.rs`, `verifier/src/main.rs`).
+- **Worker identity is NOT authenticated — a documented non-goal (Phase 5).** A worker
+  registers a self-claimed `WorkerId` (identity only); there is no cryptographic worker
+  authentication and **no anti-Sybil mechanism**. This is deliberate and out of scope: a
+  cheating worker is caught **regardless of its claimed identity** because (i) every
+  holder-action is **epoch-fenced** at the durable store, so a forged or replayed identity
+  still cannot land a stale-epoch write, and (ii) **probabilistic verification** with the
+  `P_MIN` floor catches fabricated output at the rate the hypergeometric × (1 − FAR) math
+  predicts. A Sybil worker that spins up many identities still faces the same per-segment
+  sampling floor and the same fencing on every write; identity is not load-bearing for
+  safety or fidelity. Production worker authentication (mutual TLS to the same key
+  authority that delivers keys) is a deployment concern, not built here.
   - **No plaintext on disk — proven, not asserted (Phase 2, phase2-spec.md §7).**
     The decrypted segment lives only in anonymous RAM (`memfd_create`); ffmpeg
     reads and writes it solely through `/proc/self/fd/N` handles to those memfds;
@@ -94,8 +118,12 @@
     `StaleEpoch`; exactly one `Accepted` output). The end-to-end version is
     `sched/src/sim.rs::slow_zombie_submission_is_rejected_end_to_end`. Backpressure shed:
     `sched/src/backpressure.rs` + `sched/src/sim.rs::dispatch_tick_drains_and_intake_sheds_at_the_cap`.
-    The process-level *chaos schedule* (pause a real worker past expiry, resume, assert one
-    output) lands in Phase 6.
+    **Phase 5** proves the same rejection on the **live** path: a worker reclaimed and
+    re-dispatched to another at a strictly-greater epoch has its stale-epoch submit rejected
+    by the live Redis store, with exactly one output released
+    (`bench/tests/live_smoke.rs::process_level_zombie_submit_is_rejected_with_one_output`).
+    The full process-level *chaos schedule* (a fleet paused/resumed on a randomized schedule)
+    lands in Phase 6.
 
 ## 5. Residual risks
 - (most filled from measured behavior in Phase 7)

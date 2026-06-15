@@ -22,13 +22,17 @@
 use thiserror::Error;
 
 pub mod aead;
+pub mod blob;
 pub mod key;
+pub mod keysource;
 pub mod memfd;
 mod sys;
 pub mod transcode;
 
 pub use aead::{decrypt, encrypt, EncryptedSegment, Role, SecretBuf, SegmentAad};
+pub use blob::{BlobStore, LocalBlobStore};
 pub use key::SecretKey;
+pub use keysource::{KeySource, LocalKeySource};
 pub use memfd::{decrypt_into_memfd, MemFd};
 pub use transcode::{ffmpeg_no_disk, transcode_no_disk};
 
@@ -50,6 +54,10 @@ pub enum CryptoError {
     /// A buffer presented as an `EncryptedSegment` is too short to be valid.
     #[error("malformed encrypted segment")]
     Malformed,
+    /// A requested content address (blob) or per-segment key is absent from the
+    /// local store. Phase 5 data-plane seams ([`blob`], [`keysource`]).
+    #[error("not found in local store")]
+    NotFound,
     /// AES-GCM encryption failed (e.g. plaintext exceeds the GCM length bound).
     #[error("AES-GCM encryption failed")]
     Encrypt,

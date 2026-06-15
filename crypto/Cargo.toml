@@ -13,3 +13,7 @@ aes-gcm.workspace = true
 zeroize.workspace = true
 getrandom.workspace = true
 libc.workspace = true
+# Phase 5 (phase5-spec.md §3): content-address the blob store by lead128(SHA-256(ciphertext)).
+# Same workspace-pinned hash `core` already uses — no supply-chain expansion. `core` is frozen and
+# exposes only the folded Merkle root (not the raw leaf), so the blob seam needs SHA-256 directly.
+sha2.workspace = true

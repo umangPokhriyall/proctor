@@ -200,6 +200,7 @@ dependencies = [
  "core",
  "getrandom 0.2.17",
  "libc",
+ "sha2",
  "thiserror",
  "zeroize",
 ]

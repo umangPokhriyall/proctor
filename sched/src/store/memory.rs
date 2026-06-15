@@ -320,6 +320,24 @@ impl Store for MemoryStore {
         entry.standing = entry.standing.saturating_sub(standing_penalty(delta));
         Ok(tier_from_standing(entry.standing))
     }
+
+    fn record_verdict(
+        &self,
+        worker: WorkerId,
+        detail: proctor_core::VerifyDetail,
+    ) -> Result<Tier, StoreError> {
+        let mut inner = self.lock();
+        let entry = inner
+            .workers
+            .get_mut(&worker)
+            .ok_or(StoreError::UnknownWorker(worker))?;
+        // The reference path applies the authoritative rich policy directly: asymmetric
+        // magnitudes, the Ok credit capped at Pristine, and the standing floor
+        // (reputation.rs). The Redis store re-derives the identical result in Lua
+        // (verdict_delta + clamp); the contract suite is the differential oracle.
+        entry.standing = crate::reputation::record_verdict(entry.standing, detail);
+        Ok(tier_from_standing(entry.standing))
+    }
 }
 
 #[cfg(test)]

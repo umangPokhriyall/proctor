@@ -33,7 +33,7 @@ pub use redis::RedisStore;
 
 use proctor_core::{
     Commitment, Epoch, LogicalTime, OutputRef, ReputationDelta, Task, TaskId, TransitionError,
-    WorkerId,
+    VerifyDetail, WorkerId,
 };
 use thiserror::Error;
 
@@ -264,4 +264,26 @@ pub trait Store {
     /// and reports the tier. `core::ReputationDelta` carries only penalties, so this op
     /// only ever lowers standing.
     fn update_standing(&self, worker: WorkerId, delta: ReputationDelta) -> Result<Tier, StoreError>;
+
+    /// Apply a verifier verdict's **rich** [`VerifyDetail`] to a worker's standing and
+    /// return the resulting tier (phase5-spec.md §6 — closes Phase 4's coarse-reputation
+    /// seam). Unlike [`Store::update_standing`], this carries the full detail, so it can
+    /// both *credit* a pass ([`VerifyDetail::Ok`], slow trust, capped at the baseline) and
+    /// apply the heaviest penalty for a provable [`VerifyDetail::CommitmentMismatch`]; an
+    /// [`VerifyDetail::Inconclusive`] leaves standing unchanged. The magnitudes are the
+    /// authoritative [`crate::reputation`] policy's, so both backends agree (the
+    /// differential oracle).
+    fn record_verdict(&self, worker: WorkerId, detail: VerifyDetail) -> Result<Tier, StoreError>;
+}
+
+/// The live **return channel** (phase5-spec.md §6): workers and the verifier `LPUSH`
+/// tagged holder-action frames onto a single `sched:inbound` list; `sched::loops` `BRPOP`s
+/// and routes them. Only the Redis store backs a real list — the in-memory reference uses
+/// the in-process [`crate::engine::Bus`] in the sim — so this capability is separate from
+/// the [`Store`] trait and implemented by the Redis backend alone.
+pub trait InboundChannel {
+    /// `BRPOP` one tagged frame off the `sched:inbound` return list, blocking up to
+    /// `timeout_secs`. `Ok(None)` on timeout. The frame is `[tag byte] ++ postcard(msg)`;
+    /// [`crate::loops::route_inbound`] decodes the tag and dispatches.
+    fn brpop_inbound(&self, timeout_secs: u64) -> Result<Option<Vec<u8>>, StoreError>;
 }

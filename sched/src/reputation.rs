@@ -149,6 +149,23 @@ pub fn record_result(standing: Standing, result: &VerifyResult) -> Standing {
     record_verdict(standing, result.detail)
 }
 
+/// The **signed** standing change a verdict applies, before clamping (`+PASS_CREDIT` for
+/// `Ok`, the negative fail magnitudes, `0` for `Inconclusive`). The Redis store needs the
+/// magnitude as a plain integer for its Lua `HINCRBY`-with-clamp; the in-memory store uses
+/// [`record_verdict`] directly. Both clamp to `[STANDING_FLOOR, PRISTINE]`, so
+/// `clamp(standing + verdict_delta(d)) == record_verdict(standing, d)` — one source of
+/// magnitudes across both backends (proven in tests + the store contract suite).
+#[must_use]
+pub(crate) fn verdict_delta(detail: VerifyDetail) -> i32 {
+    match detail {
+        VerifyDetail::Ok => PASS_CREDIT,
+        VerifyDetail::FidelityBelowThreshold => -FIDELITY_FAIL,
+        VerifyDetail::IntegrityViolation => -INTEGRITY_FAIL,
+        VerifyDetail::CommitmentMismatch => -COMMITMENT_FAIL,
+        VerifyDetail::Inconclusive => 0,
+    }
+}
+
 /// Apply a coarse, `core`-emitted [`ReputationDelta`] (lease `Timeout` or a
 /// `VerificationFailure` whose detail was already reduced away). The engine prefers
 /// [`record_verdict`] when it still holds the `VerifyDetail`; this path keeps the
@@ -294,6 +311,31 @@ mod tests {
         assert_eq!(record_delta(PRISTINE, ReputationDelta::Timeout), -4);
         assert_eq!(penalty(ReputationDelta::Timeout), 4);
         assert_eq!(penalty(ReputationDelta::VerificationFailure), 8);
+    }
+
+    #[test]
+    fn verdict_delta_clamped_matches_record_verdict() {
+        // The Redis store applies `clamp(standing + verdict_delta(detail))` in Lua; it must
+        // equal the in-memory `record_verdict` for every detail at every reachable standing,
+        // so the differential oracle (contract suite) compares like with like.
+        let details = [
+            VerifyDetail::Ok,
+            VerifyDetail::FidelityBelowThreshold,
+            VerifyDetail::IntegrityViolation,
+            VerifyDetail::CommitmentMismatch,
+            VerifyDetail::Inconclusive,
+        ];
+        for standing in [PRISTINE, -1, -8, -32, -63, -100, STANDING_FLOOR] {
+            for d in details {
+                let clamped = (standing + verdict_delta(d))
+                    .clamp(STANDING_FLOOR, PRISTINE);
+                assert_eq!(
+                    clamped,
+                    record_verdict(standing, d),
+                    "clamp(standing+delta) must equal record_verdict for {d:?} at {standing}"
+                );
+            }
+        }
     }
 
     #[test]

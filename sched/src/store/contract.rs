@@ -9,7 +9,8 @@
 
 use proctor_core::{
     Codec, Commitment, Container, Epoch, JobId, LogicalTime, OutputRef, ReputationDelta, SegmentId,
-    SegmentRef, Task, TaskId, TaskKind, TaskState, TargetProfile, TranscodeSpec, WorkerId,
+    SegmentRef, Task, TaskId, TaskKind, TaskState, TargetProfile, TranscodeSpec, VerifyDetail,
+    WorkerId,
 };
 
 use super::{Priority, Store, StoreError, Tier};
@@ -333,6 +334,37 @@ pub(crate) fn standing_penalties_escalate_tier<S: Store>(s: &S) {
     );
 }
 
+/// The rich, detail-aware verdict path (§6): a pass credits slowly (capped at Pristine), a
+/// fidelity fail escalates sharply, a commitment mismatch is the heaviest (Banned in one
+/// step), and an inconclusive verdict changes nothing. Both backends must agree — this is
+/// the differential-oracle proof that the Redis Lua reproduces `reputation::record_verdict`.
+pub(crate) fn record_verdict_applies_rich_magnitudes<S: Store>(s: &S) {
+    assert_eq!(
+        s.record_verdict(WorkerId(404), VerifyDetail::Ok),
+        Err(StoreError::UnknownWorker(WorkerId(404)))
+    );
+    seed(s, 1);
+
+    // A pass on a pristine worker is capped at the baseline (no super-credit).
+    assert_eq!(s.record_verdict(WA, VerifyDetail::Ok).unwrap(), Tier::Pristine);
+    // Inconclusive changes nothing.
+    assert_eq!(
+        s.record_verdict(WA, VerifyDetail::Inconclusive).unwrap(),
+        Tier::Pristine
+    );
+    // A single fidelity fail escalates off Pristine; one pass does not recover it (slow trust).
+    assert_eq!(
+        s.record_verdict(WA, VerifyDetail::FidelityBelowThreshold).unwrap(),
+        Tier::Watch
+    );
+    assert_eq!(s.record_verdict(WA, VerifyDetail::Ok).unwrap(), Tier::Watch);
+
+    // A commitment mismatch is the heaviest — Banned (ineligible) in one step, on a fresh worker.
+    let banned = s.record_verdict(WB, VerifyDetail::CommitmentMismatch).unwrap();
+    assert_eq!(banned, Tier::Banned);
+    assert!(!banned.is_eligible());
+}
+
 /// Generate the full shared contract suite as `#[test]`s, each constructing a fresh
 /// store via `$make`, an expression yielding `Option<impl Store>`. Invoked by `memory`
 /// (always `Some`) and `redis` (`Some` iff a Redis is reachable, else `None` ⇒ the case
@@ -369,6 +401,7 @@ macro_rules! store_contract_suite {
         case!(enqueue_unknown_task_rejected);
         case!(worker_load_reports_in_flight);
         case!(standing_penalties_escalate_tier);
+        case!(record_verdict_applies_rich_magnitudes);
     };
 }
 pub(crate) use store_contract_suite;

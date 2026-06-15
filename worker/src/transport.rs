@@ -36,6 +36,13 @@ redis.call('HSET',wkey,'last_heartbeat',ARGV[3])
 return {'ok'}
 "#;
 
+// Return-channel frame tags: each `sched:inbound` frame is `[tag] ++ postcard(msg)` so
+// `sched::loops` can route the shared list (postcard is not self-describing). These MUST
+// match `sched::loops::inbound` — the worker does not depend on `sched`, so the convention
+// is restated here. (HEARTBEAT = 0, SUBMISSION = 1; VERDICT = 2 is the verifier's.)
+const TAG_HEARTBEAT: u8 = 0;
+const TAG_SUBMISSION: u8 = 1;
+
 /// A synchronous Redis transport bound to a key `prefix`. Holds a [`redis::Client`]
 /// (cloneable, so per-task threads can mint their own connections) and one owned
 /// connection for the main loop's `BRPOP`/registration.
@@ -116,11 +123,12 @@ impl Sender {
         format!("{}:inbound", self.prefix)
     }
 
-    /// `LPUSH` a completed submission (carrying the lease epoch) onto `sched:inbound`.
+    /// `LPUSH` a completed submission (carrying the lease epoch) onto `sched:inbound`,
+    /// tagged so `sched::loops` can route the shared return list.
     pub fn send_submission(&self, msg: &SubmissionMsg) -> Result<(), WorkerError> {
         let mut conn = self.client.get_connection()?;
         let key = self.inbound_key();
-        let _: i64 = redis::cmd("LPUSH").arg(&key).arg(encode(msg)).query(&mut conn)?;
+        let _: i64 = redis::cmd("LPUSH").arg(&key).arg(tagged(TAG_SUBMISSION, msg)).query(&mut conn)?;
         Ok(())
     }
 
@@ -140,7 +148,7 @@ impl Sender {
                 Ok(c) => c,
                 Err(_) => return, // no connection ⇒ no heartbeats; the lease may lapse (safe)
             };
-            let bytes = encode(&msg);
+            let bytes = tagged(TAG_HEARTBEAT, &msg);
             while !sleep_interruptible(&stop_thread, interval) {
                 let _: Result<i64, _> = redis::cmd("LPUSH").arg(&key).arg(&bytes).query(&mut conn);
             }
@@ -177,6 +185,15 @@ impl Drop for Heartbeat {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Encode `msg` and prefix the return-channel `tag` byte: `[tag] ++ postcard(msg)`, the
+/// frame format `sched::loops::route_inbound` expects on `sched:inbound`.
+fn tagged<M: proctor_core::Message>(tag: u8, msg: &M) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(1 + 64);
+    frame.push(tag);
+    frame.extend_from_slice(&encode(msg));
+    frame
 }
 
 /// Sleep `interval` in small steps, returning `true` early if `stop` is set. Keeps a

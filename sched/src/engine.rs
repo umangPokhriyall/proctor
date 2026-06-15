@@ -51,6 +51,11 @@ pub enum EngineError {
     TaskNotFound(TaskId),
     #[error("task {0:?} in an unexpected state for {1}")]
     UnexpectedState(TaskId, &'static str),
+    /// A return-channel frame on `sched:inbound` had an unknown tag or undecodable body
+    /// (phase5-spec.md §6). The live driver logs and skips it — a malformed frame is never
+    /// a safety event.
+    #[error("malformed inbound frame on sched:inbound")]
+    MalformedInbound,
 }
 
 /// Engine tuning. The durations are in injected logical-time units (the bench / real run
@@ -420,6 +425,19 @@ impl<S: Store, R: Rng> Engine<S, R> {
         // Durable transition (epoch CAS — belt and suspenders).
         self.store.verify_outcome(result.task, result.passed)?;
 
+        // Rich reputation (§6 — closes Phase 4's coarse-reputation seam): apply the verifier's
+        // full `VerifyDetail` to the holder's standing on EVERY verdict, not just the failures
+        // `core` emits `EmitReputation` for. This is what credits a pass (`Ok`, slow trust) and
+        // bans a provable `CommitmentMismatch` in one step; `Inconclusive` changes nothing. A
+        // worker that deregistered in the meantime is simply skipped (the verdict still stands).
+        match self.store.record_verdict(holder, result.detail) {
+            Ok(tier) => {
+                self.lock_tiers().insert(holder, tier);
+            }
+            Err(StoreError::UnknownWorker(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+
         let mut outcome = if result.passed {
             VerifyOutcome::Accepted(OutputRef(0))
         } else {
@@ -438,13 +456,11 @@ impl<S: Store, R: Rng> Engine<S, R> {
                         .enqueue_ready(result.task, self.cfg.default_priority, now)?;
                     outcome = VerifyOutcome::Requeued;
                 }
-                TaskAction::EmitReputation(delta) => {
-                    // §7: EmitReputation → update_standing. The store delegates the magnitude
-                    // to reputation.rs; the rich VerifyDetail weighting (CommitmentMismatch
-                    // heaviest, §5.2) is owned there and lands fully once the store gains a
-                    // detail-aware standing op (a Session-2 store seam).
-                    let tier = self.store.update_standing(holder, *delta)?;
-                    self.lock_tiers().insert(holder, tier);
+                TaskAction::EmitReputation(_) => {
+                    // Reputation is now applied above from the rich `VerifyDetail` via
+                    // `store.record_verdict` (§6). `core` still emits this coarse delta on a
+                    // fail, but the detail-aware path supersedes it — applying both would
+                    // double-penalize. Intentionally a no-op.
                 }
                 TaskAction::MarkFailed(_) => { /* terminal; nothing to push */ }
                 TaskAction::IssueChallenge(_) => { /* not produced by VerifyOutcome */ }

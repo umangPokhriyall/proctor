@@ -40,6 +40,11 @@ use verify::{
 const COMPARISON_WIDTH: u32 = 160;
 const COMPARISON_HEIGHT: u32 = 120;
 
+/// Return-channel frame tag for a [`VerifyResult`] on `sched:inbound`: the frame is
+/// `[TAG_VERDICT] ++ postcard(result)` so `sched::loops` can route the shared list. MUST
+/// match `sched::loops::inbound::VERDICT` (the verifier does not depend on `sched`).
+const TAG_VERDICT: u8 = 2;
+
 /// Errors that abort the verifier loop (a single bad request is logged, not fatal).
 #[derive(Debug, thiserror::Error)]
 enum VerifierError {
@@ -349,10 +354,11 @@ fn serve(cfg: Config) -> Result<(), VerifierError> {
             }
         };
         let result = verify_request(&req, &blob, &keys, &threshold, cfg.frames);
-        let _: i64 = redis::cmd("LPUSH")
-            .arg(&inbound)
-            .arg(encode(&result))
-            .query(&mut conn)?;
+        // Tag the frame so `sched::loops` can route the shared `sched:inbound` list
+        // (`[VERDICT] ++ postcard(result)`). Must match `sched::loops::inbound::VERDICT`.
+        let mut frame = vec![TAG_VERDICT];
+        frame.extend_from_slice(&encode(&result));
+        let _: i64 = redis::cmd("LPUSH").arg(&inbound).arg(frame).query(&mut conn)?;
     }
 }
 

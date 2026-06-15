@@ -173,6 +173,22 @@ local s=redis.call('HINCRBY',wkey,'standing', -tonumber(ARGV[3]))
 return {'ok',tostring(s)}
 "#;
 
+// Rich, detail-aware standing update (§6). ARGV[3] is the SIGNED delta from
+// `reputation::verdict_delta` (+1 credit / negative fails / 0 inconclusive); ARGV[4]/[5]
+// are the floor/cap. The clamp `s := min(max(s+delta, floor), cap)` reproduces
+// `reputation::record_verdict` exactly (the in-memory reference), the differential oracle
+// proving it. Atomic: read-modify-write in one script (no WATCH/retry).
+const RECORD_VERDICT: &str = r#"
+local wkey=ARGV[1]..':worker:'..ARGV[2]
+if redis.call('EXISTS',wkey)==0 then return {'unknown'} end
+local s=tonumber(redis.call('HGET',wkey,'standing'))+tonumber(ARGV[3])
+local floor=tonumber(ARGV[4]); local cap=tonumber(ARGV[5])
+if s>cap then s=cap end
+if s<floor then s=floor end
+redis.call('HSET',wkey,'standing',s)
+return {'ok',tostring(s)}
+"#;
+
 /// Build the verify-outcome script. `MAX_RETRIES` is injected from frozen `core` rather
 /// than written as a Lua literal, so the retry budget is single-sourced.
 fn verify_outcome_lua() -> String {
@@ -597,6 +613,39 @@ impl Store for RedisStore {
             Some("unknown") => Err(StoreError::UnknownWorker(worker)),
             other => Err(StoreError::Backend(format!("update_standing: {other:?}"))),
         }
+    }
+
+    fn record_verdict(
+        &self,
+        worker: WorkerId,
+        detail: proctor_core::VerifyDetail,
+    ) -> Result<Tier, StoreError> {
+        // Signed magnitude + clamp bounds, all from the authoritative policy module, so the
+        // Lua reproduces `reputation::record_verdict` exactly (the in-memory reference).
+        let delta = crate::reputation::verdict_delta(detail).to_string();
+        let floor = crate::reputation::STANDING_FLOOR.to_string();
+        let cap = crate::reputation::PRISTINE.to_string();
+        let w = worker.0.to_string();
+        let reply: Vec<String> = self.call(RECORD_VERDICT, &[&w, &delta, &floor, &cap])?;
+        match reply.first().map(String::as_str) {
+            Some("ok") => Ok(tier_from_standing(at_i64(&reply, 1) as i32)),
+            Some("unknown") => Err(StoreError::UnknownWorker(worker)),
+            other => Err(StoreError::Backend(format!("record_verdict: {other:?}"))),
+        }
+    }
+}
+
+impl super::InboundChannel for RedisStore {
+    fn brpop_inbound(&self, timeout_secs: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        let key = format!("{}:inbound", self.prefix);
+        let mut conn = self.lock();
+        // BRPOP returns [key, value] or nil on timeout; the value is a raw tagged frame.
+        let popped: Option<(String, Vec<u8>)> = ::redis::cmd("BRPOP")
+            .arg(&key)
+            .arg(timeout_secs)
+            .query(&mut *conn)
+            .map_err(be)?;
+        Ok(popped.map(|(_, frame)| frame))
     }
 }
 

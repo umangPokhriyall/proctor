@@ -7,3 +7,16 @@ publish.workspace = true
 
 [dependencies]
 proctor_core = { package = "core", path = "../core" }
+
+[dev-dependencies]
+# Phase 5 Session 5 (phase5-spec.md §7): the live single-host smoke run wires the real
+# crypto/verify/sched library code over a local Redis + tmpfs blob store. Test-only — the
+# Phase 6 harness binary's own deps land when it is built.
+crypto = { path = "../crypto" }
+verify = { path = "../verify" }
+sched = { path = "../sched" }
+sha2.workspace = true
+redis = { version = "0.27", default-features = false, features = ["script"] }
+# Force the verify-sampling decision in the smoke (a const RNG), matching sched's sampler
+# RNG line. Test-only.
+rand = "0.8"

@@ -81,6 +81,12 @@ name = "bench"
 version = "0.0.0"
 dependencies = [
  "core",
+ "crypto",
+ "rand 0.8.6",
+ "redis",
+ "sched",
+ "sha2",
+ "verify",
 ]
 
 [[package]]

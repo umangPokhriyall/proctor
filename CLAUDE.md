@@ -10,12 +10,13 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 - docs/specs/kickoff-brief.md + kickoff-amendment-1.md  — amendment changes the math
 - docs/specs/phase0–3-spec.md  — genesis, core (FROZEN), crypto, verify (SSIM, binding, hypergeometric, ROC)
 - docs/specs/phase4-spec.md    — sched (epoch-fenced Redis store, push dispatch, policy, backpressure)
-- docs/specs/phase5-spec.md    — CURRENT: worker + verifier binaries (the live data plane)
+- docs/specs/phase5-spec.md    — worker + verifier binaries (the live data plane)
+- docs/specs/phase6-spec.md    — CURRENT: bench (harness, numbers, adversary suite)
 
 ## Frozen
 - proctor_core FROZEN @ v0.1.0-core-frozen. git diff v0.1.0-core-frozen -- core/ MUST be empty.
 - core::Task::apply is the transition authority; sched executes the TaskActions it returns.
-- crypto/verify/sched are NOT frozen: §3/§4/§5 add seams ADDITIVELY; ALL prior-phase tests must stay green.
+- sched/crypto/verify extend ADDITIVELY; ALL prior-phase suites + contract.rs (both tiers) + live_smoke green.
 
 ## Locked decisions (do not relitigate)
 1. Rust in the measured path. No async runtime in sched/worker/crypto/verify hot paths.
@@ -61,6 +62,24 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 8. Phase 5 deps: worker {proctor_core, crypto, redis, sha2, thiserror}; verifier {+verify}. Crypto seams add
    ONLY sha2 (workspace-pinned, already used by core) to content-address by lead128(SHA-256(ciphertext)).
 
+## Hard rules (Phase 6)
+1. bench is #![forbid(unsafe_code)], no async. Core-pinning = taskset (external); perf = external. No FFI.
+2. Real numbers only: a real Redis + ffmpeg on a documented host. No fabrication; loud-skip + pending if absent.
+3. Open-loop, COORDINATED-OMISSION-CORRECT injection: latency from intended-issue time (hdrhistogram expected
+   interval). Distributions (p50/p99/p99.9), never averages alone.
+4. Predicted-then-confirmed: dispatch decomposition cites Phase 4's 2 RTTs / ~95%-Redis prediction beside the
+   measurement; detection cites the published hypergeometric × (1 − FAR) prediction beside the measured rate.
+5. Detection rates carry 95% Clopper–Pearson CIs. Per class. State the cheap-downscale hardest-class caveat +
+   the remedy (FAR-constrained threshold / higher geometry). byte-swap caught deterministically at binding.
+6. Slow-zombie chaos at scale ⇒ ZERO double-outputs (fencing safety under load). Single reclaim authority.
+7. Adversary/cheating logic lives ONLY in bench. worker/ stays honest (grep-confirm).
+8. Reproducible: corpus hash, pinned versions, host topology, CO-correction, regen commands in METHODOLOGY.md.
+   Every figure cites its CSV. Writing Standard; public framing = systems artifact (flagship synergy internal).
+9. Phase 6 deps (bench): proctor_core, crypto, verify, sched, redis, rand, hdrhistogram, thiserror.
+10. Real Redis dispatch lands in sched ADDITIVELY: the dispatch loop LPUSHes the encoded Assignment to
+    {prefix}:inbox:{worker} (+ VerifyRequest to {prefix}:inbox:verifier) via the OutboundChannel seam; the
+    in-process Bus is TEST-ONLY (sim). No new sched dep.
+
 ## Crypto invariants still in force (Phase 2, do not regress)
 - Keys 256-bit, mlock'd, ZeroizeOnDrop, redacted Debug, no Serialize/disk/log surface.
 - AES-256-GCM, 12-byte random nonce, AAD = (JobId, SegmentId, Role); auth failure → Err, never plaintext.
@@ -85,6 +104,10 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
   Crypto/verify/sched additive seams add NO new deps EXCEPT crypto gains sha2 (workspace-pinned, the same
   hash core/verify use) so blob.rs can content-address by lead128(SHA-256(ciphertext)) — core is frozen and
   exposes only the folded Merkle root, not the raw leaf. Added per-session: Session 1 = crypto + sha2.
+- Phase 6 (bench): proctor_core, crypto, verify, sched, redis, rand, hdrhistogram, thiserror. Nothing else
+  (no tokio/async, no unsafe/FFI — taskset + perf are external commands; no plotting runtime dep — commit
+  CSVs). The additive sched real-dispatch change needs no new sched dep. sha2 stays a bench DEV-dep
+  (live_smoke only). Added per-session: Session 1 = crypto, verify, sched, redis, rand, hdrhistogram.
 - Later phases add their deps when reached, recorded here at that time.
 
 ## Commit discipline (Claude Code commits)
@@ -96,6 +119,7 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 
 ## Scope discipline
 Work ONLY on the given session. End with build+clippy+test, commit(s), change list, STOP.
-Phase 5 = worker + verifier + the named additive seams (crypto::blob, crypto::keysource, verify::frame
-batch, verify::integrity, sched::{loops,engine}) + the live smoke run only. NO full measurement / chaos /
-adversary suite (Phase 6). Never touch a future phase or core/.
+Phase 6 = bench (preprocess, orchestrate, inject, metrics, report, adversary) + the real-dispatch sched
+completion only. NO README/x-thread/SELF-AUDIT/distribution (Phase 7). Never touch core/ or a future phase.
+Session 1 = real Redis dispatch in sched + the bench harness (preprocess/orchestrate/inject/metrics);
+results/writeups land in Sessions 2–6.

@@ -1,0 +1,16 @@
+job,tier_before,p,caught,standing_after,tier_after
+1,Pristine,0.02,0,0,Pristine
+2,Pristine,0.02,1,-8,Watch
+3,Watch,0.10,0,-7,Watch
+4,Watch,0.10,1,-15,Suspect
+5,Suspect,0.25,0,-14,Suspect
+6,Suspect,0.25,1,-22,Suspect
+7,Suspect,0.25,0,-21,Suspect
+8,Suspect,0.25,0,-20,Suspect
+9,Suspect,0.25,0,-19,Suspect
+10,Suspect,0.25,1,-27,Suspect
+11,Suspect,0.25,1,-35,Suspended
+12,Suspended,1.00,1,-43,Suspended
+13,Suspended,1.00,1,-51,Suspended
+14,Suspended,1.00,1,-59,Suspended
+15,Suspended,1.00,1,-67,Banned

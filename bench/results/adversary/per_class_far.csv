@@ -1,0 +1,7 @@
+class,kind,n,events,rate,ci95_low,ci95_high
+honest,honest,9,0,0.0000,0.0000,0.3363
+cheap_downscale,attack,9,6,0.6667,0.2993,0.9251
+wrong_bitrate,attack,9,0,0.0000,0.0000,0.3363
+frame_substitution,attack,9,0,0.0000,0.0000,0.3363
+garbage,attack,9,0,0.0000,0.0000,0.3363
+byte_swap,attack,9,0,0.0000,0.0000,0.3363

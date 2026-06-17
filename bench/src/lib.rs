@@ -19,7 +19,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod decomp;
 pub mod inject;
 pub mod metrics;
 pub mod orchestrate;
 pub mod preprocess;
+pub mod report;

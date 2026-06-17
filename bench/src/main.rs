@@ -23,10 +23,17 @@ use sched::store::{Priority, RedisStore};
 use bench::metrics::event;
 use bench::{
     adversary, decomp, inject, metrics, orchestrate, pipeline, preprocess, report, saturation,
+    topology,
 };
 use bench::adversary::AttackClass;
 
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+/// Default platform tag (phase7-spec.md §3): the committed dev baseline host. Results are
+/// keyed under `results/<platform>/...` so the laptop set is preserved; the bare-metal re-run
+/// passes `--platform metal-<instance>`. The default matches the dir the Phase 6 set was
+/// relabelled into, so existing regen commands keep targeting it.
+const DEFAULT_PLATFORM: &str = "laptop-i5-1135g7";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -56,17 +63,21 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "proctor bench — single-host harness (phase6-spec.md)\n\
+        "proctor bench — single-host harness (phase6/phase7-spec.md)\n\
          \n\
          USAGE:\n\
          \x20 bench preprocess [--work-dir DIR]\n\
          \x20 bench run [--workers N] [--verifiers M] [--rate HZ] [--duration SECS] \\\n\
          \x20            [--redis-url URL] [--work-dir DIR]\n\
-         \x20 bench sched-decomp [--redis-url URL] [--out DIR]\n\
-         \x20 bench saturation [--workers N] [--overload X] [--duration SECS] [--redis-url URL] [--out DIR]\n\
-         \x20 bench pipeline [--clip NAME] [--out DIR]\n\
-         \x20 bench adversary [--redis-url URL] [--out DIR]\n\
+         \x20 bench sched-decomp [--redis-url URL] [--n-grid 1,4,16,64] [--platform TAG] [--out DIR]\n\
+         \x20 bench saturation [--workers N] [--overload X] [--duration SECS] [--redis-url URL] \\\n\
+         \x20            [--platform TAG] [--out DIR]\n\
+         \x20 bench pipeline [--clip NAME] [--platform TAG] [--out DIR]\n\
+         \x20 bench adversary [--redis-url URL] [--platform TAG] [--out DIR]\n\
          \n\
+         Results are keyed by platform under results/<TAG>/ (`--platform`, default the dev\n\
+         baseline laptop-i5-1135g7); the bare-metal re-run passes `--platform metal-<instance>`.\n\
+         The N grid (`--n-grid`) is capped at the host physical-core count with a loud caveat.\n\
          A `run`/`sched-decomp`/`saturation` requires a reachable Redis; `pipeline` requires ffmpeg.\n\
          `adversary` requires both. They loud-skip otherwise."
     );
@@ -87,6 +98,42 @@ fn flag_parse<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> 
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The platform tag this run's results are keyed under (`--platform`, else the dev baseline).
+fn platform_tag(args: &[String]) -> String {
+    flag(args, "--platform").unwrap_or(DEFAULT_PLATFORM).to_string()
+}
+
+/// The platform-keyed output directory for a result set: `results/<platform>/<subdir>`, unless
+/// the caller passed an explicit `--out` (which wins, verbatim).
+fn results_dir(args: &[String], subdir: &str) -> PathBuf {
+    flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| {
+        manifest_dir().join("results").join(platform_tag(args)).join(subdir)
+    })
+}
+
+/// Parse the configurable worker-count grid (`--n-grid 1,4,16,64`, phase7-spec.md §3); the
+/// laptop set is the default. Entries are validated against the host's physical-core count and
+/// a loud caveat is printed for any that would oversubscribe (no clean disjoint pinning above
+/// the physical-core ceiling).
+fn parse_n_grid(args: &[String]) -> Vec<u32> {
+    let grid: Vec<u32> = match flag(args, "--n-grid") {
+        Some(s) => s.split(',').filter_map(|p| p.trim().parse().ok()).collect(),
+        None => DEFAULT_N_GRID.to_vec(),
+    };
+    let grid = if grid.is_empty() { DEFAULT_N_GRID.to_vec() } else { grid };
+    let phys = topology::Topology::detect().physical_core_count() as u32;
+    if let Some(&max_n) = grid.iter().max() {
+        if max_n > phys {
+            eprintln!(
+                "proctor bench: CAVEAT — N grid reaches {max_n} but the host has only {phys} \
+                 physical core(s); entries above {phys} oversubscribe (not a clean scaling curve, \
+                 phase7-spec.md §3). Run on a ≥{max_n}-physical-core box for the authoritative curve."
+            );
+        }
+    }
+    grid
 }
 
 fn unique_work_dir() -> PathBuf {
@@ -163,9 +210,11 @@ fn cmd_run(args: &[String]) -> i32 {
         workload.tasks.len()
     );
 
-    // 2. Bring up the cluster (sched + workers + verifiers) over loopback Redis.
+    // 2. Bring up the cluster (sched + workers + verifiers) over loopback Redis, NUMA-aware:
+    //    dedicated cores for sched/Redis/verifier, one disjoint physical core per worker.
     let prefix = unique_prefix();
     let event_log_dir = work_dir.join("events");
+    let topo = topology::Topology::detect();
     let orch = orchestrate::Config {
         redis_url: redis_url.clone(),
         prefix: prefix.clone(),
@@ -175,7 +224,8 @@ fn cmd_run(args: &[String]) -> i32 {
         workers,
         verifiers,
         event_log_dir: event_log_dir.clone(),
-        cores: orchestrate::Config::host_cores(),
+        pinning: orchestrate::Pinning::plan(&topo, workers, verifiers),
+        raise_memlock: true,
         bin_dir: orchestrate::Config::sibling_bin_dir(),
         run_secs: None, // teardown kills the cluster; no self-exit race with the injector
     };
@@ -240,9 +290,7 @@ fn cmd_saturation(args: &[String]) -> i32 {
     let workers: u32 = flag_parse(args, "--workers", 4);
     let overload: f64 = flag_parse(args, "--overload", 10.0);
     let duration: f64 = flag_parse(args, "--duration", 15.0);
-    let out_dir = flag(args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir().join("results/saturation"));
+    let out_dir = results_dir(args, "saturation");
 
     if !redis_reachable(&redis_url) {
         eprintln!("SKIP saturation: no reachable Redis at {redis_url} (results pending)");
@@ -429,9 +477,7 @@ fn write_saturation_methodology(out_dir: &std::path::Path, sat: &saturation::Sat
 
 fn cmd_pipeline(args: &[String]) -> i32 {
     let clip = flag(args, "--clip").unwrap_or("detail.mp4").to_string();
-    let out_dir = flag(args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir().join("results/pipeline"));
+    let out_dir = results_dir(args, "pipeline");
 
     if !preprocess::ffmpeg_available() {
         eprintln!("SKIP pipeline: ffmpeg not found (results pending)");
@@ -666,9 +712,7 @@ struct DetRow {
 
 fn cmd_adversary(args: &[String]) -> i32 {
     let redis_url = flag(args, "--redis-url").unwrap_or(DEFAULT_REDIS_URL).to_string();
-    let out_dir = flag(args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir().join("results/adversary"));
+    let out_dir = results_dir(args, "adversary");
 
     if !redis_reachable(&redis_url) {
         eprintln!("SKIP adversary: no reachable Redis at {redis_url} (results pending)");
@@ -1127,19 +1171,23 @@ fn ms(ns: u64) -> f64 {
 
 // --- `sched-decomp` (the scheduling-overhead decomposition, §4) -----------------------
 
-const WORKER_COUNTS: [u32; 4] = [1, 4, 16, 64];
+/// The laptop dev-baseline worker-count grid; overridable with `--n-grid` (phase7-spec.md §3).
+const DEFAULT_N_GRID: [u32; 4] = [1, 4, 16, 64];
 
 fn cmd_sched_decomp(args: &[String]) -> i32 {
     let redis_url = flag(args, "--redis-url").unwrap_or(DEFAULT_REDIS_URL).to_string();
-    let out_dir = flag(args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir().join("results/sched"));
+    let out_dir = results_dir(args, "sched");
+    let n_grid = parse_n_grid(args);
 
     if !redis_reachable(&redis_url) {
         eprintln!("SKIP sched-decomp: no reachable Redis at {redis_url} (results pending)");
         return 0;
     }
-    eprintln!("proctor bench: sched decomposition against {redis_url} → {}", out_dir.display());
+    eprintln!(
+        "proctor bench: sched decomposition against {redis_url} → {} (N grid {:?})",
+        out_dir.display(),
+        n_grid,
+    );
 
     // (1) Isolated Redis RTT: PING (pure round trip) + LPUSH (the op dispatch ends on).
     let (ping, lpush) = match decomp::measure_redis_rtt(&redis_url, 30_000) {
@@ -1158,7 +1206,7 @@ fn cmd_sched_decomp(args: &[String]) -> i32 {
     // (2) In-process decision time (place::select_worker, no Redis) per N.
     let mut decision_rows = Vec::new();
     let mut decision_p50_us = std::collections::HashMap::new();
-    for &n in &WORKER_COUNTS {
+    for &n in &n_grid {
         let lat = decomp::measure_decision_time(n, 100_000);
         decision_p50_us.insert(n, report::us(lat.summary().p50_ns));
         decision_rows.push(report::latencies_row(&format!("decision_n{n}"), &lat));
@@ -1171,7 +1219,7 @@ fn cmd_sched_decomp(args: &[String]) -> i32 {
     let mut pure_p50_us = std::collections::HashMap::new();
     let mut achieved = std::collections::HashMap::new();
     let mut id_base = 1u64;
-    for &n in &WORKER_COUNTS {
+    for &n in &n_grid {
         let count = (60_000 / u64::from(decomp::dispatch_rtt_count(n))).clamp(500, 10_000);
         match decomp::measure_throughput(&redis_url, n, count, id_base) {
             Ok(r) => {
@@ -1202,7 +1250,7 @@ fn cmd_sched_decomp(args: &[String]) -> i32 {
 
     // (4) CO-correct dispatch latency at a sustainable rate (½ the measured ceiling) per N.
     let mut lat_rows = Vec::new();
-    for &n in &WORKER_COUNTS {
+    for &n in &n_grid {
         let ceiling = achieved.get(&n).copied().unwrap_or(1_000.0);
         let rate = (ceiling * 0.5).max(1.0);
         let count = (30_000 / u64::from(decomp::dispatch_rtt_count(n))).clamp(500, 6_000);
@@ -1232,6 +1280,7 @@ fn cmd_sched_decomp(args: &[String]) -> i32 {
         &decision_p50_us,
         &pure_p50_us,
         &achieved,
+        &n_grid,
     );
     if let Err(e) = report::write_text(out_dir.join("SUMMARY.md"), &summary) {
         eprintln!("proctor bench: writing SUMMARY.md: {e}");
@@ -1247,6 +1296,7 @@ fn build_decomp_summary(
     decision_p50_us: &std::collections::HashMap<u32, f64>,
     pure_p50_us: &std::collections::HashMap<u32, f64>,
     achieved: &std::collections::HashMap<u32, f64>,
+    n_grid: &[u32],
 ) -> String {
     let ps = ping.summary();
     let rtt_p50 = report::us(ps.p50_ns);
@@ -1302,7 +1352,7 @@ fn build_decomp_summary(
     s.push_str("## Throughput vs N (placement ceiling)\n");
     s.push_str("| N | achieved tasks/s | RTT count | decision p50 (µs) |\n");
     s.push_str("|---|---|---|---|\n");
-    for &n in &WORKER_COUNTS {
+    for &n in n_grid {
         s.push_str(&format!(
             "| {n} | {:.0} | {} | {:.3} |\n",
             achieved.get(&n).copied().unwrap_or(0.0),

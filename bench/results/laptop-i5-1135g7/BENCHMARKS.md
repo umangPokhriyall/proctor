@@ -1,4 +1,10 @@
-# BENCHMARKS — proctor, the committed numbers
+# BENCHMARKS — proctor, the committed numbers (laptop dev baseline)
+
+> **Platform `laptop-i5-1135g7` — the honest dev baseline (phase7-spec.md §3).** Scaling and
+> throughput vs N above ≈8 reflect 8-thread oversubscription, not scheduler capacity; those are
+> superseded by the bare-metal re-run (`results/metal-<instance>/`). The
+> correctness/security/crypto numbers here are hardware-independent and stand. See
+> `results/README.md` and (once it lands) `results/PLATFORM-RECONCILIATION.md`.
 
 proctor is a zero-trust control plane for verifiable, confidential transcoding on untrusted
 workers: probabilistic re-execution verification, in-memory shard-scoped crypto, and a
@@ -89,7 +95,7 @@ tracks the committed hypergeometric × (1 − FAR) prediction within confidence 
 elite line, stated:** cheap-downscale is the hardest class (FAR 66.7% here, ≈21% in the Phase-3
 study — geometry/segment-length dependent), so its effective detection sits materially below the
 raw hypergeometric; the remedy is a FAR-constrained threshold or a higher comparison geometry,
-backed by `verify/roc-curve-calibration.csv`. The full per-class treatment with CIs and the
+backed by `../verify/roc-curve-calibration.csv`. The full per-class treatment with CIs and the
 accepted tier information-leak is `adversary/ADVERSARY.md`.
 
 ## Honest negatives, collected

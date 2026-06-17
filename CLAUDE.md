@@ -11,12 +11,13 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 - docs/specs/phase0–3-spec.md  — genesis, core (FROZEN), crypto, verify (SSIM, binding, hypergeometric, ROC)
 - docs/specs/phase4-spec.md    — sched (epoch-fenced Redis store, push dispatch, policy, backpressure)
 - docs/specs/phase5-spec.md    — worker + verifier binaries (the live data plane)
-- docs/specs/phase6-spec.md    — CURRENT: bench (harness, numbers, adversary suite)
+- docs/specs/phase6-spec.md    — bench (harness, numbers, adversary suite)
+- docs/specs/phase7-spec.md    — CURRENT: hardware validation & bare-metal re-run
 
 ## Frozen
 - proctor_core FROZEN @ v0.1.0-core-frozen. git diff v0.1.0-core-frozen -- core/ MUST be empty.
 - core::Task::apply is the transition authority; sched executes the TaskActions it returns.
-- sched/crypto/verify extend ADDITIVELY; ALL prior-phase suites + contract.rs (both tiers) + live_smoke green.
+- bench/sched extend ADDITIVELY; ALL prior-phase suites + contract.rs (both tiers) + live_smoke + adversary green.
 
 ## Locked decisions (do not relitigate)
 1. Rust in the measured path. No async runtime in sched/worker/crypto/verify hot paths.
@@ -80,6 +81,23 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
     {prefix}:inbox:{worker} (+ VerifyRequest to {prefix}:inbox:verifier) via the OutboundChannel seam; the
     in-process Bus is TEST-ONLY (sim). No new sched dep.
 
+## Hard rules (Phase 7)
+1. bench/sched stay #![forbid(unsafe_code)], no async. Pinning = taskset; profiling = perf (external).
+   NUMA topology read from sysfs (file reads, no FFI); RLIMIT_MEMLOCK raised via prlimit (external).
+2. Real numbers only, from a documented BARE-METAL box (not a VM — jitter-free tail). Record exact instance,
+   kernel/microcode, ffmpeg/Redis/rustc versions, corpus SHA-256s in METHODOLOGY.md. No fabrication; loud-skip if absent.
+3. Same ffmpeg version as Phase 6 (8.0.1) so detection results stay comparable.
+4. PRESERVE the laptop results (the honest dev baseline). Results are platform-keyed (results/<platform-tag>/);
+   never overwrite/delete. Default --platform = laptop-i5-1135g7; bare-metal run passes --platform metal-<instance>.
+5. Reconcile, don't replace silently: per measurement state SUPERSEDE (hardware-confounded) / CONFIRM
+   (hardware-independent) / NEW; laptop vs bare-metal side by side; explain any CONFIRM-row divergence.
+6. The true scaling curve uses DISJOINT physical-core pinning up to the box's core count; document where
+   hyperthread/oversubscription begins. NUMA-aware pinning; dedicated cores for sched/Redis/verifier. N grid
+   is a parameter (--n-grid), capped at physical-core count with a loud caveat above it.
+7. CO-correct (intended-issue time, hdrhistogram), distributions (p50/p99/p99.9), every figure cites its CSV.
+8. Optional §6 placement-RTT remedy: MANDATORY measured before/after if attempted; additive sched; cuttable.
+   results/verify/ (ROC threshold + Phase 3 calibration) is platform-INDEPENDENT — stays at top level, not keyed.
+
 ## Crypto invariants still in force (Phase 2, do not regress)
 - Keys 256-bit, mlock'd, ZeroizeOnDrop, redacted Debug, no Serialize/disk/log surface.
 - AES-256-GCM, 12-byte random nonce, AAD = (JobId, SegmentId, Role); auth failure → Err, never plaintext.
@@ -108,6 +126,9 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
   (no tokio/async, no unsafe/FFI — taskset + perf are external commands; no plotting runtime dep — commit
   CSVs). The additive sched real-dispatch change needs no new sched dep. sha2 stays a bench DEV-dep
   (live_smoke only). Added per-session: Session 1 = crypto, verify, sched, redis, rand, hdrhistogram.
+- Phase 7 (bench/sched): NO new deps. NUMA-aware pinning + the larger N grid + platform-keyed results are
+  pure-std additions (sysfs file reads; taskset/prlimit are external commands). The optional §6 placement-RTT
+  remedy, if done, adds no new sched dep. bench allowlist unchanged.
 - Later phases add their deps when reached, recorded here at that time.
 
 ## Commit discipline (Claude Code commits)
@@ -119,7 +140,9 @@ scheduler. The honest confidentiality boundary points at the microVM flagship.
 
 ## Scope discipline
 Work ONLY on the given session. End with build+clippy+test, commit(s), change list, STOP.
-Phase 6 = bench (preprocess, orchestrate, inject, metrics, report, adversary) + the real-dispatch sched
-completion only. NO README/x-thread/SELF-AUDIT/distribution (Phase 7). Never touch core/ or a future phase.
-Session 1 = real Redis dispatch in sched + the bench harness (preprocess/orchestrate/inject/metrics);
-results/writeups land in Sessions 2–6.
+Phase 7 = harness portability prep (NUMA-aware pinning, configurable N grid, RLIMIT_MEMLOCK, platform-keyed
+results) + the bare-metal re-run + the reconciliation (+ optional placement-RTT optimization). NO README/
+x-thread/SELF-AUDIT/distribution (Phase 8). Never touch core/ or a future phase.
+Session 1 = additive bench harness prep (orchestrate NUMA-aware, --n-grid, prlimit memlock, results/<platform>/)
++ relabel the Phase 6 set as the laptop dev baseline (preserve, don't delete); the bare-metal re-run +
+reconciliation land in Sessions 2–5 (on the box).

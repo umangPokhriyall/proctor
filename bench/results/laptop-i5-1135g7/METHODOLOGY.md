@@ -1,4 +1,11 @@
-# METHODOLOGY — proctor Phase 6 measurement
+# METHODOLOGY — proctor Phase 6 measurement (laptop dev baseline)
+
+> **Platform: `laptop-i5-1135g7` — the honest dev baseline (phase7-spec.md §3).** This is the
+> Phase 6 result set, measured on a 4c/8t / 8 GB laptop. The hardware-**independent**
+> correctness/security/crypto numbers stand as-is; the hardware-**confounded**
+> scaling/throughput numbers (N above ≈8 is oversubscription on 8 threads, not scheduler
+> capacity) are superseded by the Phase 7 bare-metal re-run under `results/metal-<instance>/`.
+> Preserved deliberately, not deleted — see `results/README.md`.
 
 Every number in `BENCHMARKS.md`, `PROFILING.md`, and the per-result-set writeups comes from a
 committed CSV in this tree, produced by the `bench` harness against a **real** Redis and a
@@ -65,7 +72,7 @@ redis-server --port 6390 --save '' --appendonly no --daemonize yes --dir /tmp
 | `saturation/` | ≈10× overload (bounded resident work, shed, flat memory, Little's law) + fault-injection reclaim latency | `cargo run -p bench --release -- saturation --redis-url redis://127.0.0.1:6390` |
 | `pipeline/` | crypto-as-%-of-e2e, batched-decode verification cost, verifier-capacity envelope | `cargo run -p bench --release -- pipeline --clip detail.mp4` |
 | `adversary/` | slow-zombie chaos at scale, per-class detection + CIs vs predicted, adaptive escalation | `cargo run -p bench --release -- adversary --redis-url redis://127.0.0.1:6390` |
-| `crypto/`, `verify/` | Phase-2/3 standalone studies (AEAD throughput, no-disk audit, ROC) | `cargo run -p crypto --release --example ...` / `cargo run -p verify --release --example verify_eval` |
+| `crypto/`, `../verify/` | Phase-2/3 standalone studies (AEAD throughput, no-disk audit, ROC; `verify/` is platform-independent calibration, kept at `results/verify/`) | `cargo run -p crypto --release --example ...` / `cargo run -p verify --release --example verify_eval` |
 | `sched/perf-placement.txt` | `perf stat` on the placement loop | `perf stat -d ./target/release/bench profile-placement --n N --iters K` |
 
 ## Honesty boundaries (carried into the writeups)

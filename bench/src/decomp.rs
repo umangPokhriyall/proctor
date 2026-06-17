@@ -136,6 +136,32 @@ pub fn measure_decision_time(n: u32, samples: usize) -> Latencies {
     lat
 }
 
+/// A tight, allocation-free **placement loop** for `perf stat` to wrap (PROFILING.md): runs
+/// `place::select_worker` (the least-loaded min-scan over `n` in-memory candidates) `iters`
+/// times, returning a checksum so the loop is not optimized away. No Redis, no recording — the
+/// pure in-process decision the dispatch decomposition attributes its µs to.
+#[must_use]
+pub fn spin_placement(n: u32, iters: u64) -> u64 {
+    let store = MemoryStore::new();
+    let mut candidates = Vec::with_capacity(n as usize);
+    for w in 1..=u64::from(n) {
+        store.register_worker(WorkerId(w), LogicalTime(0)).expect("register");
+        candidates.push((WorkerId(w), Tier::Pristine));
+    }
+    let elig = Eligibility {
+        now: LogicalTime(1),
+        liveness_window: u64::MAX,
+        in_flight_cap: u32::MAX,
+    };
+    let mut acc = 0u64;
+    for _ in 0..iters {
+        if let Ok(Some(w)) = place::select_worker(&store, &candidates, &elig) {
+            acc = acc.wrapping_add(w.0);
+        }
+    }
+    acc
+}
+
 // --- Live dispatch latency + throughput (real Redis) ----------------------------------
 
 /// Build an engine over a fresh, uniquely-prefixed loopback Redis namespace with `n`

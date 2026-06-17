@@ -38,6 +38,14 @@ fn main() {
         Some("saturation") => cmd_saturation(&args[2..]),
         Some("pipeline") => cmd_pipeline(&args[2..]),
         Some("adversary") => cmd_adversary(&args[2..]),
+        Some("profile-placement") => {
+            let n: u32 = flag_parse(&args[2..], "--n", 16);
+            let iters: u64 = flag_parse(&args[2..], "--iters", 50_000_000);
+            let acc = decomp::spin_placement(n, iters);
+            // `perf stat` wraps this; the checksum keeps the loop from being elided.
+            println!("placement loop: n={n} iters={iters} checksum={acc}");
+            0
+        }
         _ => {
             usage();
             2

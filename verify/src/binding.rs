@@ -35,6 +35,15 @@ fn content_address(leaf: &[u8; 32]) -> OutputRef {
     OutputRef(u128::from_be_bytes(hi))
 }
 
+/// The single-leaf commitment a committer submits for `blob`:
+/// `Commitment::commit(&[SHA-256(blob)])` — exactly what [`check_binding`] re-derives. Exposed
+/// (additive seam) so a committer-side self-check (the `bench` harness) can derive the precise
+/// commitment without re-implementing the hash; the worker/verifier already compute this.
+#[must_use]
+pub fn commit_for_blob(blob: &[u8]) -> Commitment {
+    Commitment::commit(&[blob_leaf(blob)])
+}
+
 /// Check the single-leaf commit binding: `Commitment::commit(&[SHA-256(blob)])` must
 /// equal the worker's `submitted` commitment (frozen `core::Commitment`, single leaf).
 /// Returns the content-addressed [`OutputRef`] on success, or

@@ -33,7 +33,7 @@ pub mod integrity;
 pub mod roc;
 pub mod ssim;
 
-pub use binding::check_binding;
+pub use binding::{check_binding, commit_for_blob};
 pub use compare::{
     verify_segment, RocThreshold, SamplePlan, SegmentInputs, Verdict, ROC_THRESHOLD_PATH,
 };

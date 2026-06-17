@@ -1,0 +1,34 @@
+# perf stat — sched placement loop (place::select_worker, in-memory, no Redis)
+# Host: Intel i5-1135G7 (4c/8t, 1 NUMA), rustc 1.95 --release
+# Regenerate: perf stat -d ./target/release/bench profile-placement --n N --iters K
+# (checksum line keeps the loop from being optimized away)
+
+===== N=1 candidates, iters=20000000 =====
+placement loop: n=1 iters=20000000 checksum=20000000
+     2,323,899,986      cpu-cycles                                                            
+     9,067,035,655      instructions                                                          
+     1,341,265,621      branches                                                              
+            61,124      branch-misses                                                         
+            70,420      L1-dcache-load-misses                                                 
+             4,989      LLC-load-misses                                                       
+       0.592821095 seconds time elapsed
+
+===== N=16 candidates, iters=20000000 =====
+placement loop: n=16 iters=20000000 checksum=20000000
+    30,042,763,922      cpu-cycles                                                            
+    97,463,690,663      instructions                                                          
+    11,871,103,265      branches                                                              
+        40,391,578      branch-misses                                                         
+           536,384      L1-dcache-load-misses                                                 
+            17,825      LLC-load-misses                                                       
+       7.277900249 seconds time elapsed
+
+===== N=64 candidates, iters=20000000 =====
+placement loop: n=64 iters=20000000 checksum=20000000
+   119,132,208,767      cpu-cycles                                                            
+   387,785,407,842      instructions                                                          
+    47,266,122,988      branches                                                              
+        60,496,887      branch-misses                                                         
+         3,763,714      L1-dcache-load-misses                                                 
+            83,803      LLC-load-misses                                                       
+      30.455652774 seconds time elapsed

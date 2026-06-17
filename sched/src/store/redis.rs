@@ -649,6 +649,35 @@ impl super::InboundChannel for RedisStore {
     }
 }
 
+impl super::OutboundChannel for RedisStore {
+    fn push_assignment(&self, worker: WorkerId, frame: &[u8]) -> Result<(), StoreError> {
+        // The worker `BRPOP`s `{prefix}:inbox:{worker}` and decodes the raw Assignment bytes
+        // (worker::transport::next_assignment) — so the frame here is `encode(&assignment)`,
+        // no tag. One `LPUSH` is the second of the two `DISPATCH_REDIS_RTTS` (after lease).
+        let key = format!("{}:inbox:{}", self.prefix, worker.0);
+        let mut conn = self.lock();
+        let _: i64 = ::redis::cmd("LPUSH")
+            .arg(&key)
+            .arg(frame)
+            .query(&mut *conn)
+            .map_err(be)?;
+        Ok(())
+    }
+
+    fn push_verify_request(&self, frame: &[u8]) -> Result<(), StoreError> {
+        // The verifier `BRPOP`s `{prefix}:inbox:verifier` and decodes the raw VerifyRequest
+        // bytes (verifier::serve) — so the frame here is `encode(&req)`, no tag.
+        let key = format!("{}:inbox:verifier", self.prefix);
+        let mut conn = self.lock();
+        let _: i64 = ::redis::cmd("LPUSH")
+            .arg(&key)
+            .arg(frame)
+            .query(&mut *conn)
+            .map_err(be)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RedisStore;

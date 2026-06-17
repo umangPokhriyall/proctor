@@ -85,11 +85,23 @@ impl Inner {
     }
 }
 
+/// In-memory capture of the live dispatch transport ([`super::OutboundChannel`]) — the
+/// in-process analogue of the Redis inbox lists, so the engine's live push path
+/// (`dispatch_one_live` / `on_submission_live`) is exercisable without a Redis. A diagnostic
+/// tap: drained via [`MemoryStore::take_pushed_assignments`] /
+/// [`MemoryStore::take_pushed_verify_requests`].
+#[derive(Debug, Default)]
+struct Outbox {
+    assignments: Vec<(WorkerId, Vec<u8>)>,
+    verify_requests: Vec<Vec<u8>>,
+}
+
 /// The deterministic in-memory [`Store`] reference. Cheap to construct; clone-free
 /// sharing is via `&MemoryStore` (all ops take `&self`).
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     inner: Mutex<Inner>,
+    outbox: Mutex<Outbox>,
 }
 
 impl MemoryStore {
@@ -97,6 +109,24 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drain the captured pushed `Assignment` frames `(worker, encode(assignment))` from the
+    /// live dispatch transport tap (the in-memory analogue of `{prefix}:inbox:{worker}`).
+    #[must_use]
+    pub fn take_pushed_assignments(&self) -> Vec<(WorkerId, Vec<u8>)> {
+        std::mem::take(&mut self.lock_outbox().assignments)
+    }
+
+    /// Drain the captured pushed `VerifyRequest` frames `encode(req)` from the live transport
+    /// tap (the in-memory analogue of `{prefix}:inbox:verifier`).
+    #[must_use]
+    pub fn take_pushed_verify_requests(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.lock_outbox().verify_requests)
+    }
+
+    fn lock_outbox(&self) -> std::sync::MutexGuard<'_, Outbox> {
+        self.outbox.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Lock the inner state. A poisoned lock is unrecoverable program state, so we
@@ -337,6 +367,18 @@ impl Store for MemoryStore {
         // (verdict_delta + clamp); the contract suite is the differential oracle.
         entry.standing = crate::reputation::record_verdict(entry.standing, detail);
         Ok(tier_from_standing(entry.standing))
+    }
+}
+
+impl super::OutboundChannel for MemoryStore {
+    fn push_assignment(&self, worker: WorkerId, frame: &[u8]) -> Result<(), StoreError> {
+        self.lock_outbox().assignments.push((worker, frame.to_vec()));
+        Ok(())
+    }
+
+    fn push_verify_request(&self, frame: &[u8]) -> Result<(), StoreError> {
+        self.lock_outbox().verify_requests.push(frame.to_vec());
+        Ok(())
     }
 }
 

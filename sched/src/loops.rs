@@ -17,7 +17,7 @@ use rand::Rng;
 use crate::engine::{
     DispatchStep, Engine, EngineError, HeartbeatOutcome, SubmitOutcome, VerifyOutcome,
 };
-use crate::store::{InboundChannel, Store};
+use crate::store::{InboundChannel, OutboundChannel, Store};
 
 /// Drain the ready queue, dispatching as many tasks as there are eligible workers. Returns
 /// the number of tasks dispatched this tick. Stops at the first task with no eligible
@@ -30,6 +30,22 @@ pub fn dispatch_tick<S: Store, R: Rng>(
     // Stops at the first non-`Dispatched` step (queue empty, or a held task with no
     // eligible worker), so the tick cannot spin.
     while let DispatchStep::Dispatched { .. } = engine.dispatch_one(now)? {
+        dispatched += 1;
+    }
+    Ok(dispatched)
+}
+
+/// Drain the ready queue over the **live Redis dispatch** path (phase6-spec.md §2): like
+/// [`dispatch_tick`] but each step `LPUSH`es the encoded `Assignment` onto the worker's
+/// Redis inbox via [`Engine::dispatch_one_live`] instead of the in-process `Bus`. Used by
+/// the `sched` binary. Returns the number of tasks dispatched this tick.
+pub fn dispatch_tick_live<S, R>(engine: &Engine<S, R>, now: LogicalTime) -> Result<usize, EngineError>
+where
+    S: Store + OutboundChannel,
+    R: Rng,
+{
+    let mut dispatched = 0;
+    while let DispatchStep::Dispatched { .. } = engine.dispatch_one_live(now)? {
         dispatched += 1;
     }
     Ok(dispatched)
@@ -144,17 +160,86 @@ where
     }
 }
 
+/// Like [`route_inbound`] but on the **live Redis transport** (phase6-spec.md §2): a
+/// SUBMISSION frame routes through [`Engine::on_submission_live`], so a sampled draw
+/// `LPUSH`es its `VerifyRequest` onto the real verifier inbox instead of the in-process
+/// `Bus`. Heartbeat and verdict frames have no inbox-push side effect, so they route
+/// through the identical engine handlers.
+pub fn route_inbound_live<S, R>(
+    engine: &Engine<S, R>,
+    frame: &[u8],
+    now: LogicalTime,
+) -> Result<InboundRouted, EngineError>
+where
+    S: Store + OutboundChannel,
+    R: Rng,
+{
+    let (tag, body) = frame.split_first().ok_or(EngineError::MalformedInbound)?;
+    match *tag {
+        inbound::HEARTBEAT => {
+            let msg: HeartbeatMsg = decode(body).map_err(|_| EngineError::MalformedInbound)?;
+            Ok(InboundRouted::Heartbeat(engine.on_heartbeat(msg, now)?))
+        }
+        inbound::SUBMISSION => {
+            let msg: SubmissionMsg = decode(body).map_err(|_| EngineError::MalformedInbound)?;
+            Ok(InboundRouted::Submission(engine.on_submission_live(msg, now)?))
+        }
+        inbound::VERDICT => {
+            let msg: VerifyResult = decode(body).map_err(|_| EngineError::MalformedInbound)?;
+            Ok(InboundRouted::Verdict(engine.on_verify_result(msg, now)?))
+        }
+        _ => Err(EngineError::MalformedInbound),
+    }
+}
+
+/// One live inbound tick over the full Redis transport: `BRPOP` a frame off `sched:inbound`
+/// and route it via [`route_inbound_live`] (a sampled submission pushes its verify request
+/// back onto the verifier inbox). The `sched` binary spins this; `Ok(None)` on idle timeout.
+pub fn inbound_tick_live<S, R>(
+    engine: &Engine<S, R>,
+    timeout_secs: u64,
+    now: LogicalTime,
+) -> Result<Option<InboundRouted>, EngineError>
+where
+    S: Store + InboundChannel + OutboundChannel,
+    R: Rng,
+{
+    match engine.store().brpop_inbound(timeout_secs)? {
+        Some(frame) => Ok(Some(route_inbound_live(engine, &frame, now)?)),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proctor_core::{
-        encode, Codec, Commitment, Container, Epoch, JobId, OutputRef, SegmentId, SegmentRef, Task,
-        TargetProfile, TaskKind, TranscodeSpec, VerifyDetail, WorkerId,
+        encode, Assignment, Codec, Commitment, Container, Epoch, JobId, OutputRef, SegmentId,
+        SegmentRef, Task, TargetProfile, TaskKind, TranscodeSpec, VerifyDetail, VerifyRequest,
+        WorkerId,
     };
 
-    use crate::engine::EngineConfig;
+    use crate::engine::{EngineConfig, SubmitOutcome};
     use crate::sample::Sampler;
-    use crate::store::{MemoryStore, Store, Tier};
+    use crate::store::{MemoryStore, Priority, Store, Tier};
+
+    /// An always-sample RNG (`gen_bool(p>0)` is true) so a live submission routes to verify.
+    struct AlwaysSample;
+    impl rand::RngCore for AlwaysSample {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
 
     const WA: WorkerId = WorkerId(1);
     const C: Commitment = Commitment([7u8; 32]);
@@ -239,6 +324,89 @@ mod tests {
         assert!(matches!(routed, InboundRouted::Verdict(_)));
         // The rich path bans a provable commitment mismatch in one step (§6).
         assert_eq!(e.cached_tier(WA), Some(Tier::Banned));
+    }
+
+    #[test]
+    fn live_dispatch_tick_pushes_each_assignment_onto_the_store_outbox() {
+        // The real Redis dispatch path (phase6-spec.md §2), proven over the in-memory
+        // OutboundChannel: dispatch_tick_live LPUSHes the encoded Assignment to the worker's
+        // inbox (here the MemoryStore outbox tap), NOT the in-process Bus.
+        let e = engine();
+        e.register_worker(WA, LogicalTime(0)).unwrap();
+        e.inject(task(1), Priority::default(), LogicalTime(0)).unwrap();
+
+        let dispatched = dispatch_tick_live(&e, LogicalTime(0)).unwrap();
+        assert_eq!(dispatched, 1);
+
+        let pushed = e.store().take_pushed_assignments();
+        assert_eq!(pushed.len(), 1, "one assignment LPUSHed to the worker inbox");
+        let (worker, frame) = &pushed[0];
+        assert_eq!(*worker, WA);
+        let asg: Assignment = proctor_core::decode(frame).expect("a valid encoded Assignment");
+        assert_eq!(asg.task, TaskId(1));
+        assert_eq!(asg.lease.holder, WA);
+        // The Bus was NOT used by the live path.
+        assert!(e.bus().pop_assignment(WA).is_none());
+    }
+
+    #[test]
+    fn live_submission_when_sampled_pushes_verify_request_onto_the_store_outbox() {
+        // on_submission_live LPUSHes the VerifyRequest to the verifier inbox (the outbox tap)
+        // on a sampled draw — the live analogue of the Bus push the sim exercises.
+        let e = Engine::new(
+            MemoryStore::new(),
+            EngineConfig::for_workers(1),
+            Sampler::new(AlwaysSample),
+        );
+        e.register_worker(WA, LogicalTime(0)).unwrap();
+        e.inject(task(1), Priority::default(), LogicalTime(0)).unwrap();
+        let DispatchStep::Dispatched { epoch, .. } = e.dispatch_one_live(LogicalTime(0)).unwrap()
+        else {
+            panic!("expected a dispatch");
+        };
+        let _ = e.store().take_pushed_assignments(); // clear the dispatch frame
+
+        let out = e
+            .on_submission_live(
+                SubmissionMsg { task: TaskId(1), worker: WA, epoch, commitment: C, output: O },
+                LogicalTime(1),
+            )
+            .unwrap();
+        assert_eq!(out, SubmitOutcome::Sampled);
+
+        let verifies = e.store().take_pushed_verify_requests();
+        assert_eq!(verifies.len(), 1, "one VerifyRequest LPUSHed to the verifier inbox");
+        let req: VerifyRequest = proctor_core::decode(&verifies[0]).expect("valid VerifyRequest");
+        assert_eq!(req.task, TaskId(1));
+        assert_eq!(req.commitment, C);
+        // The Bus verify queue was NOT used by the live path.
+        assert!(e.bus().pop_verify().is_none());
+    }
+
+    #[test]
+    fn route_inbound_live_routes_a_submission_to_the_verifier_inbox() {
+        // The sched binary's return-channel router: a tagged SUBMISSION frame routes through
+        // on_submission_live, so a sampled draw lands on the verifier inbox (the outbox tap).
+        let e = Engine::new(
+            MemoryStore::new(),
+            EngineConfig::for_workers(1),
+            Sampler::new(AlwaysSample),
+        );
+        e.register_worker(WA, LogicalTime(0)).unwrap();
+        e.inject(task(1), Priority::default(), LogicalTime(0)).unwrap();
+        let DispatchStep::Dispatched { epoch, .. } = e.dispatch_one_live(LogicalTime(0)).unwrap()
+        else {
+            panic!("expected a dispatch");
+        };
+        let _ = e.store().take_pushed_assignments();
+
+        let f = frame(
+            inbound::SUBMISSION,
+            &SubmissionMsg { task: TaskId(1), worker: WA, epoch, commitment: C, output: O },
+        );
+        let routed = route_inbound_live(&e, &f, LogicalTime(1)).unwrap();
+        assert_eq!(routed, InboundRouted::Submission(SubmitOutcome::Sampled));
+        assert_eq!(e.store().take_pushed_verify_requests().len(), 1);
     }
 
     #[test]

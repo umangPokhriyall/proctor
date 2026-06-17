@@ -20,9 +20,13 @@
 //! use, so a post-submit blob swap is detectable — the verified-then-swapped TOCTOU closed,
 //! paired with §1.1 fencing.
 //!
-//! The push fabric ([`Bus`]) stands in for the §3.2 Redis inbox lists (a store extension
-//! deferred from Session 2); the engine `LPUSH`es encoded `core::proto` messages and the
-//! sim (Phase 5: the real bins) pulls and decodes — exercising the real wire codec.
+//! **Two dispatch fabrics, one decision path (phase6-spec.md §2).** The place+lease
+//! decision is factored out of the *push* so it feeds both: the live `sched` binary pushes
+//! the encoded `Assignment` straight onto the worker's Redis inbox via the store's
+//! [`OutboundChannel`] ([`Engine::dispatch_one_live`] / [`Engine::on_submission_live`]),
+//! while the `#[cfg(test)]` sim uses the in-process [`Bus`] ([`Engine::dispatch_one`] /
+//! [`Engine::on_submission`]). The `Bus` is now **test-only** — it stood in for the Redis
+//! inbox lists before Phase 6 completed the real push transport.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -39,7 +43,7 @@ use thiserror::Error;
 use crate::backpressure::{Backpressure, Sizing};
 use crate::place::{self, Eligibility};
 use crate::sample::Sampler;
-use crate::store::{Priority, Store, StoreError, Tier};
+use crate::store::{OutboundChannel, Priority, Store, StoreError, Tier};
 
 /// What went wrong driving the control plane. Store failures pass through; the rest are
 /// engine-level invariants.
@@ -141,9 +145,35 @@ pub enum DispatchStep {
     Empty,
 }
 
-/// In-process push fabric standing in for the §3.2 Redis inbox lists. The engine pushes
-/// encoded `core::proto` messages; the sim/worker/verifier pull and decode over the wire
-/// codec (workers receive, never self-select — the legacy reversal).
+/// A planned dispatch step, separated from the *push* so the same place+lease logic feeds
+/// both the in-process [`Bus`] (sim) and the live Redis inbox ([`OutboundChannel`]).
+enum DispatchPlan {
+    /// A task was leased to `worker`; push `assignment` (boxed — it dwarfs the `Idle`
+    /// variant), then report `step`.
+    Push {
+        step: DispatchStep,
+        worker: WorkerId,
+        assignment: Box<Assignment>,
+    },
+    /// Nothing to push: a task held with no eligible worker, or an empty ready queue.
+    Idle(DispatchStep),
+}
+
+/// A decided submission, separated from the verify-request *push* so the same sampling gate
+/// feeds both the [`Bus`] (sim) and the live verifier inbox ([`OutboundChannel`]).
+enum SubmissionPlan {
+    /// Stale-epoch / wrong-holder write — the slow zombie, rejected at the store (§1.1).
+    RejectedZombie,
+    /// Sampled for verification — the caller pushes this `VerifyRequest` to the verifier.
+    Sampled(Box<VerifyRequest>),
+    /// Unsampled — already content-addressed released; nothing to push.
+    Accepted(OutputRef),
+}
+
+/// In-process push fabric — **test-only** since Phase 6 (the live path pushes onto the
+/// Redis inboxes via [`OutboundChannel`]). The sim pushes encoded `core::proto` messages
+/// here and pulls/decodes them over the wire codec (workers receive, never self-select —
+/// the legacy reversal), exercising the real codec without a Redis round trip.
 #[derive(Default)]
 pub struct Bus {
     worker: Mutex<HashMap<WorkerId, VecDeque<Vec<u8>>>>,
@@ -287,12 +317,14 @@ impl<S: Store, R: Rng> Engine<S, R> {
         Ok(())
     }
 
-    /// One dispatch step: pop the next ready task, pick the least-loaded eligible worker,
-    /// atomically lease (epoch via the store) and push the `Assignment`. If no worker is
-    /// eligible the task is held (re-enqueued). Workers receive; they never self-select.
-    pub fn dispatch_one(&self, now: LogicalTime) -> Result<DispatchStep, EngineError> {
+    /// Plan one dispatch step **without** pushing: pop the next ready task, pick the
+    /// least-loaded eligible worker, atomically lease (epoch via the store), and build the
+    /// `Assignment`. If no worker is eligible the task is held (re-enqueued). Separated from
+    /// the push so the same place+lease logic feeds both the in-process [`Bus`] (sim) and
+    /// the live Redis inbox ([`OutboundChannel`]). Workers receive; they never self-select.
+    fn plan_dispatch(&self, now: LogicalTime) -> Result<DispatchPlan, EngineError> {
         let Some(task) = self.store.pop_ready()? else {
-            return Ok(DispatchStep::Empty);
+            return Ok(DispatchPlan::Idle(DispatchStep::Empty));
         };
         let candidates: Vec<(WorkerId, Tier)> =
             self.lock_tiers().iter().map(|(&w, &t)| (w, t)).collect();
@@ -316,19 +348,39 @@ impl<S: Store, R: Rng> Engine<S, R> {
                         deadline,
                     },
                 };
-                self.bus.push_assignment(worker, &assignment);
-                Ok(DispatchStep::Dispatched {
-                    task,
+                Ok(DispatchPlan::Push {
+                    step: DispatchStep::Dispatched {
+                        task,
+                        worker,
+                        epoch,
+                    },
                     worker,
-                    epoch,
+                    assignment: Box::new(assignment),
                 })
             }
             None => {
                 // Hold the task ready for a later tick; backpressure governs intake.
                 self.store
                     .enqueue_ready(task, self.cfg.default_priority, now)?;
-                Ok(DispatchStep::NoEligibleWorker(task))
+                Ok(DispatchPlan::Idle(DispatchStep::NoEligibleWorker(task)))
             }
+        }
+    }
+
+    /// One dispatch step over the **in-process [`Bus`]** (the `#[cfg(test)]` sim). Plans the
+    /// dispatch, then pushes the `Assignment` onto the worker's `Bus` inbox. The live binary
+    /// uses [`Engine::dispatch_one_live`] (real Redis inbox) instead.
+    pub fn dispatch_one(&self, now: LogicalTime) -> Result<DispatchStep, EngineError> {
+        match self.plan_dispatch(now)? {
+            DispatchPlan::Push {
+                step,
+                worker,
+                assignment,
+            } => {
+                self.bus.push_assignment(worker, &assignment);
+                Ok(step)
+            }
+            DispatchPlan::Idle(step) => Ok(step),
         }
     }
 
@@ -355,29 +407,25 @@ impl<S: Store, R: Rng> Engine<S, R> {
         }
     }
 
-    /// Handle a worker submission: persist the epoch-fenced `Leased → Submitted` (the slow
-    /// zombie is rejected here), then run the sampling gate — sampled pushes a
-    /// `VerifyRequest`, unsampled content-addresses the release.
-    pub fn on_submission(
-        &self,
-        msg: SubmissionMsg,
-        _now: LogicalTime,
-    ) -> Result<SubmitOutcome, EngineError> {
+    /// Decide a worker submission **without** pushing the verify request: persist the
+    /// epoch-fenced `Leased → Submitted` (the slow zombie is rejected here), run the
+    /// sampling gate, and — when unsampled — content-address the release. When sampled it
+    /// returns the `VerifyRequest` for the caller to push. Separated from the push so the
+    /// same gate feeds both the [`Bus`] (sim) and the live verifier inbox.
+    fn decide_submission(&self, msg: SubmissionMsg) -> Result<SubmissionPlan, EngineError> {
         match self
             .store
             .submit(msg.task, msg.worker, msg.epoch, msg.commitment, msg.output)
         {
             Ok(()) => {}
             Err(StoreError::StaleEpoch { .. } | StoreError::WrongHolder { .. }) => {
-                return Ok(SubmitOutcome::RejectedZombie);
+                return Ok(SubmissionPlan::RejectedZombie);
             }
             Err(e) => return Err(e.into()),
         }
 
         // Sampling gate (§5.3): Bernoulli(p_tier) over the worker's cached tier.
-        let tier = self
-            .cached_tier(msg.worker)
-            .unwrap_or(Tier::Pristine);
+        let tier = self.cached_tier(msg.worker).unwrap_or(Tier::Pristine);
         let sampled = self.lock_sampler().sample_tier(tier);
         self.store.select_or_accept(msg.task, sampled)?;
 
@@ -386,17 +434,34 @@ impl<S: Store, R: Rng> Engine<S, R> {
                 .store
                 .load(msg.task)?
                 .ok_or(EngineError::TaskNotFound(msg.task))?;
-            self.bus.push_verify(&VerifyRequest {
+            Ok(SubmissionPlan::Sampled(Box::new(VerifyRequest {
                 task: msg.task,
                 kind: t.kind,
                 commitment: msg.commitment,
                 output: msg.output,
-            });
-            Ok(SubmitOutcome::Sampled)
+            })))
         } else {
             // Unsampled: content-addressed release, bound lazily by the recorded commitment.
             self.do_release(msg.output, msg.commitment);
-            Ok(SubmitOutcome::Accepted(msg.output))
+            Ok(SubmissionPlan::Accepted(msg.output))
+        }
+    }
+
+    /// Handle a worker submission over the **in-process [`Bus`]** (the `#[cfg(test)]` sim):
+    /// decide it, and on a sampled draw push the `VerifyRequest` onto the `Bus`. The live
+    /// binary uses [`Engine::on_submission_live`] (real verifier inbox) instead.
+    pub fn on_submission(
+        &self,
+        msg: SubmissionMsg,
+        _now: LogicalTime,
+    ) -> Result<SubmitOutcome, EngineError> {
+        match self.decide_submission(msg)? {
+            SubmissionPlan::RejectedZombie => Ok(SubmitOutcome::RejectedZombie),
+            SubmissionPlan::Sampled(req) => {
+                self.bus.push_verify(&req);
+                Ok(SubmitOutcome::Sampled)
+            }
+            SubmissionPlan::Accepted(output) => Ok(SubmitOutcome::Accepted(output)),
         }
     }
 
@@ -491,6 +556,48 @@ impl<S: Store, R: Rng> Engine<S, R> {
     }
     fn lock_sampler(&self) -> std::sync::MutexGuard<'_, Sampler<R>> {
         self.sampler.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The **live** push transport (phase6-spec.md §2): the same engine over a store that also
+/// backs real Redis inbox lists ([`OutboundChannel`]). These mirror [`Engine::dispatch_one`]
+/// / [`Engine::on_submission`] but `LPUSH` the encoded message straight onto the worker /
+/// verifier inbox instead of the in-process [`Bus`], so the whole transport is Redis
+/// end-to-end and measurable. The `sched` binary drives these; the sim keeps the `Bus`.
+impl<S: Store + OutboundChannel, R: Rng> Engine<S, R> {
+    /// One dispatch step that `LPUSH`es the encoded `Assignment` onto the worker's Redis
+    /// inbox (`{prefix}:inbox:{worker}`), the list the real `worker` bin `BRPOP`s. Same
+    /// place+lease decision as [`Engine::dispatch_one`]; only the push fabric differs.
+    pub fn dispatch_one_live(&self, now: LogicalTime) -> Result<DispatchStep, EngineError> {
+        match self.plan_dispatch(now)? {
+            DispatchPlan::Push {
+                step,
+                worker,
+                assignment,
+            } => {
+                self.store.push_assignment(worker, &encode(&*assignment))?;
+                Ok(step)
+            }
+            DispatchPlan::Idle(step) => Ok(step),
+        }
+    }
+
+    /// Handle a worker submission and, on a sampled draw, `LPUSH` the encoded `VerifyRequest`
+    /// onto `{prefix}:inbox:verifier`, the list the real `verifier` bin `BRPOP`s. Same
+    /// epoch-fenced gate as [`Engine::on_submission`]; only the push fabric differs.
+    pub fn on_submission_live(
+        &self,
+        msg: SubmissionMsg,
+        _now: LogicalTime,
+    ) -> Result<SubmitOutcome, EngineError> {
+        match self.decide_submission(msg)? {
+            SubmissionPlan::RejectedZombie => Ok(SubmitOutcome::RejectedZombie),
+            SubmissionPlan::Sampled(req) => {
+                self.store.push_verify_request(&encode(&*req))?;
+                Ok(SubmitOutcome::Sampled)
+            }
+            SubmissionPlan::Accepted(output) => Ok(SubmitOutcome::Accepted(output)),
+        }
     }
 }
 

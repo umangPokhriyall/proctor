@@ -287,3 +287,20 @@ pub trait InboundChannel {
     /// [`crate::loops::route_inbound`] decodes the tag and dispatches.
     fn brpop_inbound(&self, timeout_secs: u64) -> Result<Option<Vec<u8>>, StoreError>;
 }
+
+/// The live **dispatch channel** (phase6-spec.md §2): the real Redis push transport. The
+/// dispatch loop `LPUSH`es an encoded [`proctor_core::Assignment`] onto a worker's inbox
+/// (`{prefix}:inbox:{worker}`), the list the real `worker` bin `BRPOP`s; the submission
+/// gate `LPUSH`es an encoded [`proctor_core::VerifyRequest`] onto `{prefix}:inbox:verifier`,
+/// the list the real `verifier` bin `BRPOP`s. Only the Redis store backs real lists — the
+/// sim uses the in-process [`crate::engine::Bus`] — so this is a capability separate from
+/// the [`Store`] trait, implemented by the Redis backend alone (mirrors [`InboundChannel`]).
+/// Frames are the raw `postcard(msg)` bytes (no tag): a worker/verifier inbox is
+/// single-typed, so each `BRPOP`er decodes exactly one message type.
+pub trait OutboundChannel {
+    /// `LPUSH` an encoded `Assignment` frame onto `{prefix}:inbox:{worker}`.
+    fn push_assignment(&self, worker: WorkerId, frame: &[u8]) -> Result<(), StoreError>;
+
+    /// `LPUSH` an encoded `VerifyRequest` frame onto `{prefix}:inbox:verifier`.
+    fn push_verify_request(&self, frame: &[u8]) -> Result<(), StoreError>;
+}

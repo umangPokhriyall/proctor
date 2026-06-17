@@ -5,18 +5,23 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Phase 6 (phase6-spec.md §2): the single-host harness binary. The library code under
+# measurement (proctor_core, crypto, verify, sched) plus the orchestration/metrics deps.
+# Allowlist: proctor_core, crypto, verify, sched, redis, rand, hdrhistogram, thiserror.
+# No tokio/async, no unsafe/FFI (taskset + perf are external commands), no plotting runtime
+# dep (results are committed CSVs).
 [dependencies]
 proctor_core = { package = "core", path = "../core" }
-
-[dev-dependencies]
-# Phase 5 Session 5 (phase5-spec.md §7): the live single-host smoke run wires the real
-# crypto/verify/sched library code over a local Redis + tmpfs blob store. Test-only — the
-# Phase 6 harness binary's own deps land when it is built.
 crypto = { path = "../crypto" }
 verify = { path = "../verify" }
 sched = { path = "../sched" }
-sha2.workspace = true
 redis = { version = "0.27", default-features = false, features = ["script"] }
-# Force the verify-sampling decision in the smoke (a const RNG), matching sched's sampler
-# RNG line. Test-only.
 rand = "0.8"
+hdrhistogram = "7"
+thiserror.workspace = true
+
+[dev-dependencies]
+# Phase 5 Session 5 (phase5-spec.md §7): the live single-host smoke run reuses the regular
+# deps above plus sha2 to recompute content addresses (a pre-existing Phase 5 dev-dep, not a
+# Phase 6 allowlist addition).
+sha2.workspace = true

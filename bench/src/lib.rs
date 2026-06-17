@@ -19,6 +19,33 @@
 
 #![forbid(unsafe_code)]
 
+/// A throwaway `Transcode` task with a dummy source — shared by the measurement/chaos
+/// harnesses. Dispatch only reads `kind` to build the `Assignment`; no blob is fetched on the
+/// dispatch path, so the source ref need not resolve.
+#[must_use]
+pub fn dummy_transcode_task(id: u64) -> proctor_core::Task {
+    use proctor_core::{
+        Codec, Container, JobId, SegmentId, SegmentRef, Task, TargetProfile, TaskId, TaskKind,
+        TranscodeSpec,
+    };
+    Task::new(
+        TaskId(id),
+        TaskKind::Transcode(TranscodeSpec {
+            job: JobId(1),
+            segment: SegmentId(id),
+            profile: TargetProfile {
+                codec: Codec::H264,
+                width: 320,
+                height: 240,
+                bitrate_kbps: 800,
+                container: Container::Mp4,
+            },
+            source: SegmentRef(u128::from(id)),
+        }),
+    )
+}
+
+pub mod adversary;
 pub mod decomp;
 pub mod inject;
 pub mod metrics;
